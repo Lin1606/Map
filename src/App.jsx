@@ -1,4 +1,17 @@
 import { useState, useEffect, useRef } from "react";
+import { initializeApp } from "firebase/app";
+import { getFirestore, collection, addDoc, updateDoc, doc, onSnapshot } from "firebase/firestore";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAOewwuO9vnZHMTHwojLE1XBO0wIuM-IIU",
+  authDomain: "our-map-9f7f7.firebaseapp.com",
+  projectId: "our-map-9f7f7",
+  storageBucket: "our-map-9f7f7.firebasestorage.app",
+  messagingSenderId: "116966481134",
+  appId: "1:116966481134:web:7bc16b55e66f25adebe7ff"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
 
 // ============================================================
 // 👋 CATEGORIES
@@ -374,8 +387,8 @@ export default function AdventureMap() {
       const cat = getCat(spot.category);
       const icon = L.divIcon({
         className: "",
-        html: `<div class="pin-marker ${spot.status==="visited"?"visited":""}">${spot.status==="visited"?"":cat.emoji}</div>`,
-        iconSize: [20, 20], iconAnchor: [10, 10],
+        html: `<div class="pin-marker">${spot.status==="visited" ? "✓" : cat.emoji}</div>`,
+        iconSize: [12, 12], iconAnchor: [6, 6],
       });
       const marker = L.marker([spot.lat, spot.lng], { icon })
         .bindTooltip(spot.name, { direction: "top", offset: [0, -10], className: "map-tooltip" });
@@ -580,9 +593,8 @@ export default function AdventureMap() {
     .hint{font-size:11px;color:var(--text-light);margin-top:-4px;margin-bottom:12px;line-height:1.5}
 
     /* MAP PINS */
-    .pin-marker{width:20px;height:20px;border-radius:50%;background:white;border:2px solid #333;display:flex;align-items:center;justify-content:center;font-size:10px;box-shadow:0 2px 6px rgba(0,0,0,0.18);cursor:pointer;transition:transform .15s}
-    .pin-marker.visited{background:#333}
-    .pin-marker:hover{transform:scale(1.3)}
+    .pin-marker{width:12px;height:12px;border-radius:50%;background:white;border:1.5px solid #333;display:flex;align-items:center;justify-content:center;font-size:7px;box-shadow:0 2px 6px rgba(0,0,0,0.18);cursor:pointer;transition:transform .15s}
+    .pin-marker:hover{transform:scale(1.4)}
     .cluster-icon{width:36px;height:36px;border-radius:50%;background:#333;color:white;display:flex;align-items:center;justify-content:center;font-family:'Inter',sans-serif;font-weight:500;font-size:13px;border:3px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.25)}
     .leaflet-marker-icon.leaflet-div-icon{background:transparent;border:none}
     .map-tooltip{background:var(--text)!important;color:white!important;border:none!important;border-radius:6px!important;font-family:var(--fb)!important;font-size:13px!important;font-weight:400!important;padding:5px 11px!important;box-shadow:0 2px 8px rgba(0,0,0,.18)!important}
