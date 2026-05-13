@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, addDoc, updateDoc, doc, onSnapshot } from "firebase/firestore";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyAOewwuO9vnZHMTHwojLE1XBO0wIuM-IIU",
@@ -12,6 +13,8 @@ const firebaseConfig = {
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
+const auth = getAuth(firebaseApp);
+const googleProvider = new GoogleAuthProvider();
 
 // ============================================================
 // 👋 CATEGORIES
@@ -192,6 +195,14 @@ function RichEditor({ content, onChange }) {
 export default function AdventureMap() {
   const [spots, setSpots] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [nominatimResults, setNominatimResults] = useState([]);
+  const [pendingPlace, setPendingPlace] = useState(null);
+  const pendingMarkerRef = useRef(null);
+  const searchTimeout = useRef(null);
   const [view, setView] = useState("map"); // "map" | "gallery" | "spot"
   const [selectedSpotId, setSelectedSpotId] = useState(null);
   const [editing, setEditing] = useState(false);
@@ -218,6 +229,15 @@ export default function AdventureMap() {
   const getCat = (id) => CATEGORIES.find(c => c.id === id) || CATEGORIES[0];
   const today = () => new Date().toISOString().split("T")[0];
 
+  // 👋 AUTH: Listen for login/logout
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setAuthLoading(false);
+    });
+    return () => unsub();
+  }, []);
+
   // 👋 FIREBASE: Load spots in real time
   // onSnapshot = every time data changes in Firebase, update the screen
   useEffect(() => {
@@ -240,6 +260,81 @@ export default function AdventureMap() {
     }
     return true;
   });
+
+  // Sign in with Google
+  const signIn = async () => {
+    try { await signInWithPopup(auth, googleProvider); } catch (e) { console.error(e); }
+  };
+
+  const signOutUser = async () => {
+    try { await signOut(auth); } catch (e) { console.error(e); }
+  };
+
+  // Search: local spots + Nominatim
+  const handleSearch = (val) => {
+    setSearch(val);
+    if (!val.trim()) { setSearchResults([]); setNominatimResults([]); return; }
+
+    // Local spots
+    const q = val.toLowerCase();
+    const local = spots.filter(s =>
+      `${s.name} ${s.city||""} ${s.country||""}`.toLowerCase().includes(q)
+    ).slice(0, 4);
+    setSearchResults(local);
+
+    // Nominatim search with debounce
+    clearTimeout(searchTimeout.current);
+    searchTimeout.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(val)}&format=json&limit=4&addressdetails=1`);
+        const data = await res.json();
+        setNominatimResults(data);
+      } catch (e) { console.error(e); }
+    }, 500);
+  };
+
+  // Fly to a Nominatim result and show "Add as spot" pin
+  const flyToPlace = (place) => {
+    if (!leafletMap.current) return;
+    const lat = parseFloat(place.lat);
+    const lng = parseFloat(place.lon);
+    leafletMap.current.flyTo([lat, lng], 13, { duration: 1.2 });
+
+    // Remove old pending marker
+    if (pendingMarkerRef.current) leafletMap.current.removeLayer(pendingMarkerRef.current);
+
+    const L = window.L;
+    const icon = L.divIcon({
+      className: "",
+      html: `<div style="width:16px;height:16px;border-radius:50%;background:#4A90D9;border:2.5px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.25)"/>`,
+      iconSize: [16, 16], iconAnchor: [8, 8],
+    });
+    const marker = L.marker([lat, lng], { icon }).addTo(leafletMap.current);
+    pendingMarkerRef.current = marker;
+
+    const city = place.address?.city || place.address?.town || place.address?.village || place.address?.county || "";
+    const country = place.address?.country || "";
+    const name = place.name || place.display_name.split(",")[0];
+
+    setPendingPlace({ name, lat, lng: parseFloat(place.lon), city, country });
+    setSearch("");
+    setSearchResults([]);
+    setNominatimResults([]);
+    setSearchOpen(true);
+    setView("map");
+  };
+
+  const addPendingAsSpot = () => {
+    if (!pendingPlace) return;
+    setNewSpot(p => ({ ...p, ...pendingPlace }));
+    setShowAddForm(true);
+    setSelectedSpotId(null);
+    if (pendingMarkerRef.current && leafletMap.current) {
+      leafletMap.current.removeLayer(pendingMarkerRef.current);
+      pendingMarkerRef.current = null;
+    }
+    setPendingPlace(null);
+  };
 
   const openSpot = (id) => {
     setSelectedSpotId(id);
@@ -655,6 +750,30 @@ export default function AdventureMap() {
       <style>{css}</style>
       <div className="app">
 
+        {/* AUTH LOADING */}
+        {authLoading && (
+          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}>
+            <div style={{width:24,height:24,border:"2px solid var(--border)",borderTop:"2px solid var(--accent)",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
+          </div>
+        )}
+
+        {/* LOGIN SCREEN */}
+        {!authLoading && !user && (
+          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:20,padding:32}}>
+            <div style={{fontFamily:"var(--fd)",fontSize:"42px",fontWeight:500,color:"var(--text)",textAlign:"center",lineHeight:1.1}}>Our <em style={{fontStyle:"italic",color:"var(--text-mid)"}}>Map</em></div>
+            <div style={{fontSize:"13px",color:"var(--text-light)",letterSpacing:".1em",textTransform:"uppercase",textAlign:"center"}}>Adventures & Places We Love</div>
+            <div style={{height:1,width:60,background:"var(--border)",margin:"8px 0"}}/>
+            <button onClick={signIn} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 24px",border:"1px solid var(--border)",borderRadius:"24px",background:"var(--bg)",cursor:"pointer",fontFamily:"var(--fb)",fontSize:"15px",fontWeight:400,color:"var(--text)",transition:"all .18s",boxShadow:"0 2px 8px rgba(0,0,0,0.08)"}}>
+              <svg width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+              Sign in with Google
+            </button>
+            <div style={{fontSize:"12px",color:"var(--text-light)",textAlign:"center",maxWidth:280,lineHeight:1.6}}>Private access only. Sign in with your travel account to continue.</div>
+          </div>
+        )}
+
+        {/* MAIN APP — only shown when logged in */}
+        {!authLoading && user && <>
+
         {/* HEADER */}
         <div className="hdr">
           <div className="hdr-title">Our <em>Map</em></div>
@@ -669,8 +788,61 @@ export default function AdventureMap() {
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
                 )}
               </button>
-              {searchOpen && <input className="search-input" placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)} autoFocus/>}
+              {searchOpen && (
+                <div style={{position:"relative",flex:1}}>
+                  <input className="search-input" placeholder="Search spots or find a place…" value={search}
+                    onChange={e=>handleSearch(e.target.value)}
+                    onFocus={()=>setSearchFocused(true)}
+                    onBlur={()=>setTimeout(()=>setSearchFocused(false),200)}
+                    autoFocus/>
+                  {/* SEARCH DROPDOWN */}
+                  {searchFocused && (searchResults.length > 0 || nominatimResults.length > 0) && (
+                    <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,right:0,background:"var(--bg)",border:"1px solid var(--border)",borderRadius:"10px",boxShadow:"0 4px 20px rgba(0,0,0,0.12)",zIndex:9999,overflow:"hidden",maxHeight:"320px",overflowY:"auto"}}>
+                      {searchResults.length > 0 && (
+                        <>
+                          <div style={{padding:"8px 14px 4px",fontSize:"10px",fontWeight:500,letterSpacing:".14em",textTransform:"uppercase",color:"var(--text-light)"}}>Your spots</div>
+                          {searchResults.map(s => (
+                            <div key={s.id} style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:10,transition:"background .15s"}}
+                              onMouseEnter={e=>e.currentTarget.style.background="var(--bg-soft)"}
+                              onMouseLeave={e=>e.currentTarget.style.background="transparent"}
+                              onMouseDown={()=>{ openSpot(s.id); setSearchOpen(false); setSearch(""); setSearchResults([]); setNominatimResults([]); }}>
+                              <span style={{fontSize:"16px"}}>{getCat(s.category).emoji}</span>
+                              <div>
+                                <div style={{fontSize:"14px",fontWeight:400,color:"var(--text)"}}>{s.name}</div>
+                                <div style={{fontSize:"11px",color:"var(--text-light)"}}>{s.city}{s.city&&s.country?" · ":""}{s.country}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </>
+                      )}
+                      {nominatimResults.length > 0 && (
+                        <>
+                          <div style={{padding:"8px 14px 4px",fontSize:"10px",fontWeight:500,letterSpacing:".14em",textTransform:"uppercase",color:"var(--text-light)",borderTop:searchResults.length>0?"1px solid var(--border-soft)":"none"}}>Places on the map</div>
+                          {nominatimResults.map((p, i) => (
+                            <div key={i} style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:10,transition:"background .15s"}}
+                              onMouseEnter={e=>e.currentTarget.style.background="var(--bg-soft)"}
+                              onMouseLeave={e=>e.currentTarget.style.background="transparent"}
+                              onMouseDown={()=>flyToPlace(p)}>
+                              <span style={{fontSize:"16px"}}>📍</span>
+                              <div>
+                                <div style={{fontSize:"14px",fontWeight:400,color:"var(--text)"}}>{p.name || p.display_name.split(",")[0]}</div>
+                                <div style={{fontSize:"11px",color:"var(--text-light)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"260px"}}>{p.display_name}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
+            <button onClick={signOutUser} style={{background:"none",border:"1px solid var(--border)",borderRadius:"22px",padding:"6px 12px",fontFamily:"var(--fb)",fontSize:"12px",color:"var(--text-light)",cursor:"pointer",display:"flex",alignItems:"center",gap:6,transition:"all .15s"}}
+              onMouseEnter={e=>e.currentTarget.style.color="var(--text)"}
+              onMouseLeave={e=>e.currentTarget.style.color="var(--text-light)"}>
+              <img src={user?.photoURL||""} style={{width:20,height:20,borderRadius:"50%",display:user?.photoURL?"block":"none"}} alt=""/>
+              Sign out
+            </button>
           </div>
         </div>
 
@@ -717,7 +889,21 @@ export default function AdventureMap() {
                 Loading your spots…
               </div>}
               {showAddForm && <div className="map-hint">👆 Click on the map to place your spot</div>}
-              {!showAddForm && <button className="add-btn" onClick={()=>{setShowAddForm(true);setSelectedSpotId(null);}}>+</button>}
+              {pendingPlace && !showAddForm && (
+                <div style={{position:"absolute",bottom:24,left:"50%",transform:"translateX(-50%)",zIndex:999,display:"flex",gap:10,alignItems:"center"}}>
+                  <div style={{background:"var(--bg)",border:"1px solid var(--border)",borderRadius:"22px",padding:"10px 18px",fontSize:"14px",fontWeight:400,color:"var(--text)",fontFamily:"var(--fb)",boxShadow:"0 4px 14px rgba(0,0,0,.15)",whiteSpace:"nowrap"}}>
+                    📍 {pendingPlace.name}
+                  </div>
+                  <button style={{background:"var(--accent)",color:"white",border:"none",borderRadius:"22px",padding:"10px 18px",fontSize:"14px",fontWeight:500,cursor:"pointer",fontFamily:"var(--fb)",boxShadow:"0 4px 14px rgba(0,0,0,.15)",whiteSpace:"nowrap"}} onClick={addPendingAsSpot}>
+                    + Add as spot
+                  </button>
+                  <button style={{background:"var(--bg)",border:"1px solid var(--border)",borderRadius:"22px",padding:"10px 14px",fontSize:"13px",cursor:"pointer",fontFamily:"var(--fb)",color:"var(--text-mid)"}} onClick={()=>{
+                    if(pendingMarkerRef.current&&leafletMap.current)leafletMap.current.removeLayer(pendingMarkerRef.current);
+                    pendingMarkerRef.current=null;setPendingPlace(null);
+                  }}>✕</button>
+                </div>
+              )}
+              {!showAddForm && !pendingPlace && <button className="add-btn" onClick={()=>{setShowAddForm(true);setSelectedSpotId(null);}}>+</button>}
             </div>
 
             <div className="sb">
@@ -1019,6 +1205,7 @@ export default function AdventureMap() {
         )}
 
         {shareNotice && <div className="toast">✓ Link copied!</div>}
+        </> /* end of logged in section */}
       </div>
     </>
   );
