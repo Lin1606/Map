@@ -96,10 +96,33 @@ function StarRating({ rating, onRate, readonly = false }) {
 // ============================================================
 function RichEditor({ content, onChange }) {
   const editorRef = useRef(null);
+  const savedRange = useRef(null);
+
+  // Save the cursor position before toolbar button steals focus
+  const saveSelection = () => {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) {
+      savedRange.current = sel.getRangeAt(0);
+    }
+  };
+
+  // Restore cursor position back into the editor
+  const restoreSelection = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+    if (savedRange.current) {
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(savedRange.current);
+    }
+  };
 
   const exec = (cmd, value = null) => {
+    restoreSelection();
     document.execCommand(cmd, false, value);
     if (editorRef.current) onChange(editorRef.current.innerHTML);
+    savedRange.current = null;
   };
 
   const handleInput = () => {
@@ -117,22 +140,24 @@ function RichEditor({ content, onChange }) {
   return (
     <div className="editor-wrap">
       <div className="editor-toolbar">
-        <button type="button" className="tb-btn" onClick={()=>exec('formatBlock','H2')}><strong style={{fontSize:'15px'}}>H1</strong></button>
-        <button type="button" className="tb-btn" onClick={()=>exec('formatBlock','H3')}><strong style={{fontSize:'13px'}}>H2</strong></button>
-        <button type="button" className="tb-btn" onClick={()=>exec('formatBlock','P')}>T</button>
+        <button type="button" className="tb-btn" onMouseDown={e=>{e.preventDefault();saveSelection();}} onClick={()=>exec('formatBlock','H2')}><strong style={{fontSize:'15px'}}>H1</strong></button>
+        <button type="button" className="tb-btn" onMouseDown={e=>{e.preventDefault();saveSelection();}} onClick={()=>exec('formatBlock','H3')}><strong style={{fontSize:'13px'}}>H2</strong></button>
+        <button type="button" className="tb-btn" onMouseDown={e=>{e.preventDefault();saveSelection();}} onClick={()=>exec('formatBlock','P')}>T</button>
         <span className="tb-sep"/>
-        <button type="button" className="tb-btn" onClick={()=>exec('bold')}><strong>B</strong></button>
-        <button type="button" className="tb-btn" onClick={()=>exec('italic')}><em>I</em></button>
-        <button type="button" className="tb-btn" onClick={()=>exec('underline')}><u>U</u></button>
+        <button type="button" className="tb-btn" onMouseDown={e=>{e.preventDefault();saveSelection();}} onClick={()=>exec('bold')}><strong>B</strong></button>
+        <button type="button" className="tb-btn" onMouseDown={e=>{e.preventDefault();saveSelection();}} onClick={()=>exec('italic')}><em>I</em></button>
+        <button type="button" className="tb-btn" onMouseDown={e=>{e.preventDefault();saveSelection();}} onClick={()=>exec('underline')}><u>U</u></button>
         <span className="tb-sep"/>
-        <button type="button" className="tb-btn" onClick={()=>exec('insertUnorderedList')}>•</button>
-        <button type="button" className="tb-btn" onClick={()=>exec('insertOrderedList')}>1.</button>
-        <button type="button" className="tb-btn" onClick={()=>{
+        <button type="button" className="tb-btn" onMouseDown={e=>{e.preventDefault();saveSelection();}} onClick={()=>exec('insertUnorderedList')}>•</button>
+        <button type="button" className="tb-btn" onMouseDown={e=>{e.preventDefault();saveSelection();}} onClick={()=>exec('insertOrderedList')}>1.</button>
+        <button type="button" className="tb-btn" onMouseDown={e=>{e.preventDefault();saveSelection();}} onClick={()=>{
+          restoreSelection();
           document.execCommand('insertHTML', false, '<div class="todo-item"><input type="checkbox"/> <span>To do…</span></div>');
           handleInput();
+          savedRange.current = null;
         }}>☐</button>
         <span className="tb-sep"/>
-        <button type="button" className="tb-btn" onClick={()=>exec('formatBlock','BLOCKQUOTE')}>"</button>
+        <button type="button" className="tb-btn" onMouseDown={e=>{e.preventDefault();saveSelection();}} onClick={()=>exec('formatBlock','BLOCKQUOTE')}>"</button>
       </div>
       <div
         ref={editorRef}
@@ -152,7 +177,8 @@ function RichEditor({ content, onChange }) {
 // MAIN APP
 // ============================================================
 export default function AdventureMap() {
-  const [spots, setSpots] = useState(INITIAL_SPOTS);
+  const [spots, setSpots] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [view, setView] = useState("map"); // "map" | "gallery" | "spot"
   const [selectedSpotId, setSelectedSpotId] = useState(null);
   const [editing, setEditing] = useState(false);
@@ -179,6 +205,17 @@ export default function AdventureMap() {
   const getCat = (id) => CATEGORIES.find(c => c.id === id) || CATEGORIES[0];
   const today = () => new Date().toISOString().split("T")[0];
 
+  // 👋 FIREBASE: Load spots in real time
+  // onSnapshot = every time data changes in Firebase, update the screen
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "spots"), (snapshot) => {
+      const data = snapshot.docs.map(d => ({ ...d.data(), firestoreId: d.id }));
+      setSpots(data);
+      setLoading(false);
+    });
+    return () => unsub(); // cleanup when component unmounts
+  }, []);
+
   const filtered = spots.filter(s => {
     if (!activeCategories.has(s.category)) return false;
     if (statusFilter !== "all" && s.status !== statusFilter) return false;
@@ -195,6 +232,13 @@ export default function AdventureMap() {
     setSelectedSpotId(id);
     setEditing(false);
     setEditDraft(null);
+    // stays in current view (map or gallery), just selects the spot in sidebar
+  };
+
+  const openFullPage = (id) => {
+    setSelectedSpotId(id);
+    setEditing(false);
+    setEditDraft(null);
     setView("spot");
   };
 
@@ -203,8 +247,13 @@ export default function AdventureMap() {
     setEditing(true);
   };
 
-  const saveEditing = () => {
-    setSpots(p => p.map(s => s.id === editDraft.id ? { ...editDraft, updatedAt: today() } : s));
+  const saveEditing = async () => {
+    const updated = { ...editDraft, updatedAt: today() };
+    // 👋 Update in Firebase
+    if (updated.firestoreId) {
+      const { firestoreId, ...data } = updated;
+      await updateDoc(doc(db, "spots", firestoreId), data);
+    }
     setSelectedSpotId(editDraft.id);
     setEditing(false);
     setEditDraft(null);
@@ -217,22 +266,33 @@ export default function AdventureMap() {
 
   const updateDraft = (field, value) => setEditDraft(p => ({ ...p, [field]: value }));
 
-  const updateSpot = (id, field, value) => {
-    setSpots(p => p.map(s => s.id === id ? { ...s, [field]: value, updatedAt: today() } : s));
+  const updateSpot = async (id, field, value) => {
+    const spot = spots.find(s => s.id === id);
+    if (!spot || !spot.firestoreId) return;
+    await updateDoc(doc(db, "spots", spot.firestoreId), { [field]: value, updatedAt: today() });
   };
 
-  const toggleVisited = (id) => {
-    setSpots(p => p.map(s => {
-      if (s.id !== id) return s;
-      const newStatus = s.status === "visited" ? "want" : "visited";
-      return { ...s, status: newStatus, visitedDate: newStatus === "visited" ? (s.visitedDate || today()) : null, updatedAt: today() };
-    }));
+  const toggleVisited = async (id) => {
+    const spot = spots.find(s => s.id === id);
+    if (!spot) return;
+    const newStatus = spot.status === "visited" ? "want" : "visited";
+    const updates = { status: newStatus, visitedDate: newStatus === "visited" ? (spot.visitedDate || today()) : null, updatedAt: today() };
+    // 👋 Update in Firebase
+    if (spot.firestoreId) await updateDoc(doc(db, "spots", spot.firestoreId), updates);
   };
 
-  const addSpot = () => {
+  const addSpot = async () => {
     if (!newSpot.name || !newSpot.lat || !newSpot.lng) return;
-    const spot = { ...newSpot, id: Date.now(), lat: parseFloat(newSpot.lat), lng: parseFloat(newSpot.lng), visitedDate: newSpot.status === "visited" ? today() : null, updatedAt: today() };
-    setSpots(p => [...p, spot]);
+    const spot = {
+      ...newSpot,
+      id: Date.now(),
+      lat: parseFloat(newSpot.lat),
+      lng: parseFloat(newSpot.lng),
+      visitedDate: newSpot.status === "visited" ? today() : null,
+      updatedAt: today(),
+    };
+    // 👋 Save to Firebase
+    await addDoc(collection(db, "spots"), spot);
     setShowAddForm(false);
     setNewSpot({ name:"", category:"nature", lat:"", lng:"", country:"", city:"", content:"<p></p>", status:"want", rating:null, strollerFriendly:false, links:[], images:[], coverIndex:0 });
   };
@@ -277,7 +337,13 @@ export default function AdventureMap() {
   }, []);
 
   useEffect(() => {
-    if (!mapReady || !mapRef.current || leafletMap.current) return;
+    if (!mapReady || !mapRef.current) return;
+    if (view !== "map") return;
+    // If map already exists and container is still valid, just invalidate size
+    if (leafletMap.current) {
+      setTimeout(() => leafletMap.current.invalidateSize(), 100);
+      return;
+    }
     const L = window.L;
     const map = L.map(mapRef.current, { center: [40, 20], zoom: 3 });
     L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
@@ -531,6 +597,7 @@ export default function AdventureMap() {
     @keyframes toastIn{from{opacity:0;transform:translate(-50%,8px)}to{opacity:1;transform:translate(-50%,0)}}
     @keyframes fi{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
 
+    @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
     @media(max-width:700px){
       .map-main{grid-template-columns:1fr;grid-template-rows:45vh 1fr}
       .spot-hero{height:220px}
@@ -599,8 +666,16 @@ export default function AdventureMap() {
           </div>
         )}
 
+        {/* LOADING STATE */}
+        {loading && (
+          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)",fontFamily:"var(--fb)",fontSize:"14px",color:"var(--text-light)",gap:10}}>
+            <div style={{width:20,height:20,border:"2px solid var(--border)",borderTop:"2px solid var(--accent)",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
+            Loading your spots…
+          </div>
+        )}
+
         {/* ==================== MAP VIEW ==================== */}
-        {view === "map" && (
+        {!loading && view === "map" && (
           <div className="map-main">
             <div className="map-wrap">
               <div ref={mapRef} style={{width:"100%",height:"100%",cursor:showAddForm?"crosshair":"auto"}}/>
@@ -653,6 +728,44 @@ export default function AdventureMap() {
                     <button className="btn" onClick={()=>setShowAddForm(false)}>Cancel</button>
                   </div>
                 </div>
+              ) : selectedSpot ? (
+                /* SIDEBAR SPOT PREVIEW */
+                <div className="sb-preview" style={{animation:"fi .22s ease"}}>
+                  {/* Cover */}
+                  <div style={{position:"relative",width:"100%",height:"180px",background:"var(--bg-panel)",display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",flexShrink:0}}>
+                    {getCover(selectedSpot) ? (
+                      <img src={getCover(selectedSpot)} alt={selectedSpot.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                    ) : (
+                      <div style={{fontSize:"50px",opacity:.2}}>{getCat(selectedSpot.category).emoji}</div>
+                    )}
+                    <div style={{position:"absolute",inset:0,background:"linear-gradient(to bottom,transparent 40%,rgba(0,0,0,0.4) 100%)",pointerEvents:"none"}}/>
+                    <button onClick={()=>setSelectedSpotId(null)} style={{position:"absolute",top:12,left:12,background:"rgba(255,255,255,0.9)",border:"1px solid rgba(255,255,255,0.5)",cursor:"pointer",fontSize:"12px",color:"var(--text)",fontFamily:"var(--fb)",padding:"5px 12px",borderRadius:"16px",backdropFilter:"blur(6px)"}}>← Back</button>
+                  </div>
+
+                  <div style={{padding:"18px 22px 28px"}}>
+                    <span className="spot-cat-badge" style={{marginBottom:10}}>{getCat(selectedSpot.category).emoji} {getCat(selectedSpot.category).label}</span>
+                    <div style={{fontFamily:"var(--fd)",fontSize:"26px",fontWeight:500,color:"var(--text)",lineHeight:1.15,marginBottom:4}}>{selectedSpot.name}</div>
+                    <div style={{fontSize:"12px",fontWeight:400,letterSpacing:".08em",textTransform:"uppercase",color:"var(--text-light)",marginBottom:14}}>{selectedSpot.city}{selectedSpot.city&&selectedSpot.country?" · ":""}{selectedSpot.country}</div>
+
+                    <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:16,paddingBottom:16,borderBottom:"1px solid var(--border-soft)"}}>
+                      <span className={`tag ${selectedSpot.status==="visited"?"active":""}`} onClick={()=>toggleVisited(selectedSpot.id)}>
+                        {selectedSpot.status==="visited"?"✅ Visited":"🌟 Want to go"}
+                      </span>
+                      {selectedSpot.strollerFriendly&&<span className="tag plain">🍼</span>}
+                      <div style={{marginLeft:"auto"}}><StarRating rating={selectedSpot.rating} onRate={r=>updateSpot(selectedSpot.id,"rating",r)} readonly={selectedSpot.status!=="visited"}/></div>
+                    </div>
+
+                    {/* Short content preview */}
+                    {selectedSpot.content && selectedSpot.content !== "<p></p>" && (
+                      <div style={{fontSize:"14px",lineHeight:1.7,color:"var(--text-mid)",marginBottom:18,display:"-webkit-box",WebkitLineClamp:4,WebkitBoxOrient:"vertical",overflow:"hidden"}} dangerouslySetInnerHTML={{__html:selectedSpot.content}}/>
+                    )}
+
+                    {/* Full view button */}
+                    <button className="btn p" style={{width:"100%",justifyContent:"center",display:"flex",gap:6}} onClick={()=>openFullPage(selectedSpot.id)}>
+                      ⤢ Open full page
+                    </button>
+                  </div>
+                </div>
               ) : (
                 <div>
                   <div className="list-hdr">Your spots<span className="list-cnt">{filtered.length} {filtered.length===1?"place":"places"} showing</span></div>
@@ -679,14 +792,14 @@ export default function AdventureMap() {
         )}
 
         {/* ==================== GALLERY VIEW ==================== */}
-        {view === "gallery" && (
+        {!loading && view === "gallery" && (
           <div className="gallery-view">
             <div className="gallery-grid-view">
               {filtered.map(s => {
                 const cat = getCat(s.category);
                 const cover = getCover(s);
                 return (
-                  <div key={s.id} className="gallery-card" onClick={()=>openSpot(s.id)}>
+                  <div key={s.id} className="gallery-card" onClick={()=>openFullPage(s.id)}>
                     <div className="gallery-card-cover">
                       {cover ? <img src={cover} alt={s.name} loading="lazy"/> : <div className="gallery-card-cover-empty">{cat.emoji}</div>}
                     </div>
@@ -712,7 +825,7 @@ export default function AdventureMap() {
         )}
 
         {/* ==================== SPOT FULL PAGE ==================== */}
-        {view === "spot" && spot && (
+        {!loading && view === "spot" && spot && (
           <div className="spot-page">
             {/* HERO */}
             <div className="spot-hero">
