@@ -350,13 +350,7 @@ export default function AdventureMap() {
   }, []);
 
   useEffect(() => {
-    if (!mapReady || !mapRef.current) return;
-    if (view !== "map") return;
-    // If map already exists and container is still valid, just invalidate size
-    if (leafletMap.current) {
-      setTimeout(() => leafletMap.current.invalidateSize(), 100);
-      return;
-    }
+    if (!mapReady || !mapRef.current || leafletMap.current) return;
     const L = window.L;
     const map = L.map(mapRef.current, { center: [40, 20], zoom: 3 });
     L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
@@ -401,6 +395,13 @@ export default function AdventureMap() {
     if (!leafletMap.current || !selectedSpot || view !== "map") return;
     leafletMap.current.flyTo([selectedSpot.lat, selectedSpot.lng], 11, { duration: 1.2 });
   }, [selectedSpotId]);
+
+  // When coming back to map view, force Leaflet to recalculate its size
+  useEffect(() => {
+    if (view === "map" && leafletMap.current) {
+      setTimeout(() => leafletMap.current.invalidateSize(), 150);
+    }
+  }, [view]);
 
   // Update map click handler when showAddForm changes
   useEffect(() => {
