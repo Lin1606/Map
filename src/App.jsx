@@ -825,7 +825,6 @@ export default function AdventureMap() {
               )}
             </div>
           </div>
-        </div>
 
         {/* ==================== GALLERY VIEW ==================== */}
         {!loading && view === "gallery" && (
