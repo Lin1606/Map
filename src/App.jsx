@@ -351,6 +351,7 @@ export default function AdventureMap() {
 
   useEffect(() => {
     if (!mapReady || !mapRef.current || leafletMap.current) return;
+    if (view !== "map") return; // wait until map is visible
     const L = window.L;
     const map = L.map(mapRef.current, { center: [40, 20], zoom: 3 });
     L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
@@ -396,12 +397,39 @@ export default function AdventureMap() {
     leafletMap.current.flyTo([selectedSpot.lat, selectedSpot.lng], 11, { duration: 1.2 });
   }, [selectedSpotId]);
 
-  // When coming back to map view, force Leaflet to recalculate its size
+  // When switching to map view: init if needed, or just invalidate size
   useEffect(() => {
-    if (view === "map" && leafletMap.current) {
-      setTimeout(() => leafletMap.current.invalidateSize(), 150);
+    if (view !== "map") return;
+    if (leafletMap.current) {
+      setTimeout(() => leafletMap.current.invalidateSize(), 100);
+    } else if (mapReady && mapRef.current) {
+      // trigger re-run of map init effect
+      setTimeout(() => {
+        if (!leafletMap.current && mapRef.current && window.L) {
+          const L = window.L;
+          const map = L.map(mapRef.current, { center: [40, 20], zoom: 3 });
+          L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+            attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/">CARTO</a>',
+            maxZoom: 19,
+          }).addTo(map);
+          map.on("click", (e) => {
+            setNewSpot(p => ({ ...p, lat: e.latlng.lat.toFixed(5), lng: e.latlng.lng.toFixed(5) }));
+            if (!showAddForm) { setShowAddForm(true); setSelectedSpotId(null); }
+          });
+          leafletMap.current = map;
+          clusterRef.current = L.markerClusterGroup({
+            maxClusterRadius: 50,
+            showCoverageOnHover: false,
+            iconCreateFunction: (cluster) => L.divIcon({
+              html: `<div class="cluster-icon">${cluster.getChildCount()}</div>`,
+              className: '', iconSize: [36, 36],
+            })
+          });
+          map.addLayer(clusterRef.current);
+        }
+      }, 100);
     }
-  }, [view]);
+  }, [view, mapReady]);
 
   // Update map click handler when showAddForm changes
   useEffect(() => {
@@ -679,20 +707,15 @@ export default function AdventureMap() {
           </div>
         )}
 
-        {/* LOADING STATE */}
-        {loading && (
-          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)",fontFamily:"var(--fb)",fontSize:"14px",color:"var(--text-light)",gap:10}}>
-            <div style={{width:20,height:20,border:"2px solid var(--border)",borderTop:"2px solid var(--accent)",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
-            Loading your spots…
-          </div>
-        )}
-
-        {/* ==================== MAP VIEW ==================== */}
-        {!loading && view === "map" && (
-          <div className="map-main">
+        {/* ==================== MAP VIEW — always rendered so Leaflet can init ==================== */}
+        <div className="map-main" style={{display: view === "map" ? "grid" : "none"}}>
             <div className="map-wrap">
               <div ref={mapRef} style={{width:"100%",height:"100%",cursor:showAddForm?"crosshair":"auto"}}/>
               {!mapReady&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg-soft)",fontSize:"14px",color:"var(--text-light)"}}>Loading map…</div>}
+              {loading&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg-soft)",fontFamily:"var(--fb)",fontSize:"14px",color:"var(--text-light)",gap:10,zIndex:999}}>
+                <div style={{width:20,height:20,border:"2px solid var(--border)",borderTop:"2px solid var(--accent)",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
+                Loading your spots…
+              </div>}
               {showAddForm && <div className="map-hint">👆 Click on the map to place your spot</div>}
               {!showAddForm && <button className="add-btn" onClick={()=>{setShowAddForm(true);setSelectedSpotId(null);}}>+</button>}
             </div>
@@ -802,7 +825,7 @@ export default function AdventureMap() {
               )}
             </div>
           </div>
-        )}
+        </div>
 
         {/* ==================== GALLERY VIEW ==================== */}
         {!loading && view === "gallery" && (
