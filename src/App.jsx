@@ -1,6 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { MapContainer, TileLayer, Marker, Popup, useMapEvents } from "react-leaflet";
-import "leaflet/dist/leaflet.css";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, addDoc, updateDoc, doc, onSnapshot } from "firebase/firestore";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
@@ -22,6 +20,39 @@ const auth = getAuth(firebaseApp);
 const googleProvider = new GoogleAuthProvider();
 
 // ============================================================
+// 🗺 GOOGLE MAPS
+// 👇👇👇 HIER deinen eingeschränkten Maps API Key zwischen die
+//        Anführungszeichen einsetzen (die " " müssen bleiben!)
+// ============================================================
+const GOOGLE_MAPS_API_KEY = "AIzaSyChVCf5wrydzuAAuoFkUjOB8h9OaRA5Q5U";
+
+// This is what makes the map calmer: it hides shop/business names,
+// public-transport labels and road/highway names — but keeps the
+// familiar country & city names so it still feels like Google Maps.
+const CLEAN_MAP_STYLE = [
+  { featureType: "poi", elementType: "labels", stylers: [{ visibility: "off" }] },
+  { featureType: "poi.business", stylers: [{ visibility: "off" }] },
+  { featureType: "transit", stylers: [{ visibility: "off" }] },
+  { featureType: "road", elementType: "labels", stylers: [{ visibility: "off" }] },
+];
+
+// Loads the Google Maps script once, then remembers it's loaded.
+let googleMapsPromise = null;
+function loadGoogleMaps() {
+  if (window.google && window.google.maps) return Promise.resolve();
+  if (googleMapsPromise) return googleMapsPromise;
+  googleMapsPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&v=weekly`;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Google Maps failed to load"));
+    document.head.appendChild(script);
+  });
+  return googleMapsPromise;
+}
+
+// ============================================================
 // 👋 CATEGORIES — copy a line and change details to add new one!
 // ============================================================
 const CATEGORIES = [
@@ -31,6 +62,63 @@ const CATEGORIES = [
   { id: "food",       label: "Food & Drinks",       emoji: "🍜" },
   { id: "historical", label: "Historical & Hidden", emoji: "🏯" },
 ];
+
+// ============================================================
+// 🗓 TIMING / CALENDAR HELPERS
+// Each spot can say WHEN it's worth visiting:
+//   type "all"  → good all year (default; old spots count as this)
+//   type "best" → best in a season, still OK otherwise (FADES out of season)
+//   type "only" → only worth it on these dates, e.g. a festival (HIDDEN if trip misses)
+// mode "range" → month range (May–Jun)   |   mode "date" → exact days (5–8 Aug)
+// Everything repeats every year.
+// ============================================================
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const MONTH_DAYS = [31,28,31,30,31,30,31,31,30,31,30,31];
+
+function defaultTiming() {
+  return { type: "all", mode: "range", startMonth: 1, startDay: 1, endMonth: 12, endDay: 31 };
+}
+
+// Turn month+day into a "day of year" number (1–365) so dates can be compared.
+function toDOY(month, day) {
+  let d = 0;
+  for (let m = 0; m < month - 1; m++) d += MONTH_DAYS[m];
+  const safeDay = Math.min(Math.max(day || 1, 1), MONTH_DAYS[month - 1]);
+  return d + safeDay;
+}
+
+// A range might wrap past New Year (Dec–Feb). Split it into normal pieces.
+function rangeSegments(start, end) {
+  return start <= end ? [[start, end]] : [[start, 365], [1, end]];
+}
+
+// Do two date ranges overlap on the calendar? (handles year wrap)
+function rangesOverlap(s1, e1, s2, e2) {
+  for (const [a1, a2] of rangeSegments(s1, e1)) {
+    for (const [b1, b2] of rangeSegments(s2, e2)) {
+      if (a1 <= b2 && b1 <= a2) return true;
+    }
+  }
+  return false;
+}
+
+// Does this spot's season overlap with the trip the user is planning?
+function timingMatchesTrip(t, trip) {
+  const s1 = toDOY(t.startMonth, t.startDay || 1);
+  const e1 = toDOY(t.endMonth, t.endDay || MONTH_DAYS[t.endMonth - 1]);
+  const s2 = toDOY(trip.startMonth, trip.startDay || 1);
+  const e2 = toDOY(trip.endMonth, trip.endDay || MONTH_DAYS[trip.endMonth - 1]);
+  return rangesOverlap(s1, e1, s2, e2);
+}
+
+// Short label like "Best May–Jun" or "Only 5–8 Aug" to show on a spot.
+function formatTiming(t) {
+  if (!t || t.type === "all") return null;
+  const startD = t.mode === "date" ? `${t.startDay} ${MONTHS[t.startMonth - 1]}` : MONTHS[t.startMonth - 1];
+  const endD = t.mode === "date" ? `${t.endDay} ${MONTHS[t.endMonth - 1]}` : MONTHS[t.endMonth - 1];
+  const span = startD === endD ? startD : `${startD}–${endD}`;
+  return (t.type === "only" ? "Only " : "Best ") + span;
+}
 
 // ============================================================
 // 👋 YOUR SPOTS — data now lives in Firebase, not here!
@@ -53,6 +141,53 @@ function StarRating({ rating, onRate, readonly = false }) {
 }
 
 // ============================================================
+// 🗓 TIMING EDITOR — used in the add form and the edit page
+// ============================================================
+function TimingEditor({ timing, onChange, inputClass = "finp" }) {
+  const t = timing || defaultTiming();
+  const set = (patch) => onChange({ ...t, ...patch });
+  return (
+    <div>
+      <select className={inputClass} value={t.type} onChange={e => set({ type: e.target.value })}>
+        <option value="all">🗓 Good all year</option>
+        <option value="best">🌤 Best in a season</option>
+        <option value="only">🎏 Only on specific dates</option>
+      </select>
+      {t.type !== "all" && (
+        <div style={{ marginTop: 8 }}>
+          <select className={inputClass} style={{ marginBottom: 8 }} value={t.mode} onChange={e => set({ mode: e.target.value })}>
+            <option value="range">A range of months</option>
+            <option value="date">Specific days</option>
+          </select>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+            <span style={{ fontSize: 12, color: "var(--text-light)", width: 38 }}>From</span>
+            <select className={inputClass} value={t.startMonth} onChange={e => set({ startMonth: +e.target.value })}>
+              {MONTHS.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
+            </select>
+            {t.mode === "date" && (
+              <select className={inputClass} value={t.startDay} onChange={e => set({ startDay: +e.target.value })}>
+                {Array.from({ length: MONTH_DAYS[t.startMonth - 1] }, (_, i) => <option key={i} value={i + 1}>{i + 1}</option>)}
+              </select>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "var(--text-light)", width: 38 }}>To</span>
+            <select className={inputClass} value={t.endMonth} onChange={e => set({ endMonth: +e.target.value })}>
+              {MONTHS.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
+            </select>
+            {t.mode === "date" && (
+              <select className={inputClass} value={t.endDay} onChange={e => set({ endDay: +e.target.value })}>
+                {Array.from({ length: MONTH_DAYS[t.endMonth - 1] }, (_, i) => <option key={i} value={i + 1}>{i + 1}</option>)}
+              </select>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
 // QUILL EDITOR — proper rich text, no cursor bugs!
 // ============================================================
 function QuillEditor({ content, onChange }) {
@@ -61,14 +196,12 @@ function QuillEditor({ content, onChange }) {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    // Load Quill CSS
     if (!document.querySelector('link[href*="quill"]')) {
       const link = document.createElement("link");
       link.rel = "stylesheet";
       link.href = "https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css";
       document.head.appendChild(link);
     }
-    // Load Quill JS
     if (window.Quill) { setReady(true); return; }
     const script = document.createElement("script");
     script.src = "https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js";
@@ -107,52 +240,112 @@ function QuillEditor({ content, onChange }) {
 }
 
 // ============================================================
-// MAP CLICK HANDLER — react-leaflet component
+// 🗺 GOOGLE MAP VIEW — replaces the old Leaflet map
+// Draws the map, the spot pins, and the blue "pending" marker.
 // ============================================================
-function MapClickHandler({ onMapClick }) {
-  useMapEvents({ click: (e) => onMapClick(e.latlng) });
-  return null;
-}
+function GoogleMapView({ spots, pendingPlace, onMapClick, onMarkerClick, getCat }) {
+  const mapRef = useRef(null);        // the <div> the map draws into
+  const mapObj = useRef(null);        // the google.maps.Map instance
+  const markers = useRef([]);         // current spot pins
+  const pendingMarker = useRef(null); // the blue search pin
+  const onMapClickRef = useRef(onMapClick);
+  const [ready, setReady] = useState(false);
 
-// ============================================================
-// CUSTOM PIN MARKER
-// ============================================================
-function SpotMarker({ spot, getCat, onClick }) {
-  const cat = getCat(spot.category);
-  const isVisited = spot.status === "visited";
+  // keep the latest click handler without re-creating the map
+  useEffect(() => { onMapClickRef.current = onMapClick; }, [onMapClick]);
 
+  // a tiny signature so we only redraw pins when something actually changes
+  const sig = useMemo(
+    () => spots.map(s => `${s.id}:${s.lat}:${s.lng}:${s.status}:${s.category}:${s._faded ? 1 : 0}`).join("|"),
+    [spots]
+  );
+
+  // 1) create the map once
   useEffect(() => {
-    if (!window.L) return;
+    let cancelled = false;
+    loadGoogleMaps()
+      .then(() => {
+        if (cancelled || !mapRef.current || mapObj.current) return;
+        const g = window.google;
+        mapObj.current = new g.maps.Map(mapRef.current, {
+          center: { lat: 40, lng: 20 },
+          zoom: 3,
+          styles: CLEAN_MAP_STYLE,
+          clickableIcons: false,
+          mapTypeControl: false,
+          streetViewControl: false,
+          fullscreenControl: false,
+          zoomControl: true,
+        });
+        mapObj.current.addListener("click", (e) => {
+          onMapClickRef.current({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+        });
+        setReady(true);
+      })
+      .catch((err) => console.error(err));
+    return () => { cancelled = true; };
   }, []);
 
-  if (!window.L) return null;
+  // 2) redraw the spot pins whenever the spots change
+  useEffect(() => {
+    if (!ready) return;
+    const g = window.google;
+    markers.current.forEach(m => m.setMap(null));
+    markers.current = [];
+    spots.forEach(spot => {
+      const cat = getCat(spot.category);
+      const isVisited = spot.status === "visited";
+      const marker = new g.maps.Marker({
+        position: { lat: spot.lat, lng: spot.lng },
+        map: mapObj.current,
+        title: spot.name,
+        opacity: spot._faded ? 0.35 : 1,
+        label: { text: isVisited ? "✓" : cat.emoji, fontSize: "11px" },
+        icon: {
+          path: g.maps.SymbolPath.CIRCLE,
+          fillColor: "#ffffff",
+          fillOpacity: 1,
+          strokeColor: "#333333",
+          strokeWeight: 1.5,
+          scale: 11,
+        },
+      });
+      marker.addListener("click", () => onMarkerClick(spot.id));
+      markers.current.push(marker);
+    });
+  }, [sig, ready]);
 
-  const L = window.L;
-  const icon = L.divIcon({
-    className: "",
-    html: `<div style="width:12px;height:12px;border-radius:50%;background:white;border:1.5px solid #333;display:flex;align-items:center;justify-content:center;font-size:7px;box-shadow:0 2px 6px rgba(0,0,0,0.18);cursor:pointer;">${isVisited ? "✓" : cat.emoji}</div>`,
-    iconSize: [12, 12], iconAnchor: [6, 6],
-  });
+  // 3) blue "pending" marker + fly there when you pick a search result
+  useEffect(() => {
+    if (!ready) return;
+    const g = window.google;
+    if (pendingMarker.current) { pendingMarker.current.setMap(null); pendingMarker.current = null; }
+    if (pendingPlace) {
+      pendingMarker.current = new g.maps.Marker({
+        position: { lat: pendingPlace.lat, lng: pendingPlace.lng },
+        map: mapObj.current,
+        icon: {
+          path: g.maps.SymbolPath.CIRCLE,
+          fillColor: "#4A90D9",
+          fillOpacity: 1,
+          strokeColor: "#ffffff",
+          strokeWeight: 2.5,
+          scale: 8,
+        },
+      });
+      mapObj.current.panTo({ lat: pendingPlace.lat, lng: pendingPlace.lng });
+      mapObj.current.setZoom(Math.max(mapObj.current.getZoom() || 3, 11));
+    }
+  }, [pendingPlace, ready]);
 
   return (
-    <Marker position={[spot.lat, spot.lng]} icon={icon} eventHandlers={{ click: () => onClick(spot.id) }}>
-      <Popup>{spot.name}</Popup>
-    </Marker>
+    <div className="gmap-wrap">
+      {GOOGLE_MAPS_API_KEY === "PASTE_YOUR_MAPS_KEY_HERE" && (
+        <div className="gmap-keynote">⚠ Add your Google Maps API key in the code (top of the file) to see the map.</div>
+      )}
+      <div ref={mapRef} className="gmap" />
+    </div>
   );
-}
-
-// ============================================================
-// PENDING PLACE MARKER
-// ============================================================
-function PendingMarker({ place }) {
-  if (!window.L || !place) return null;
-  const L = window.L;
-  const icon = L.divIcon({
-    className: "",
-    html: `<div style="width:16px;height:16px;border-radius:50%;background:#4A90D9;border:2.5px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.25)"/>`,
-    iconSize: [16, 16], iconAnchor: [8, 8],
-  });
-  return <Marker position={[place.lat, place.lng]} icon={icon}/>;
 }
 
 // ============================================================
@@ -170,6 +363,7 @@ export default function AdventureMap() {
   const [activeCategories, setActiveCategories] = useState(new Set(CATEGORIES.map(c => c.id)));
   const [statusFilter, setStatusFilter] = useState("all");
   const [strollerFilter, setStrollerFilter] = useState(false);
+  const [tripFilter, setTripFilter] = useState({ active: false, startMonth: 1, startDay: 1, endMonth: 12, endDay: 31 });
   const [showAddForm, setShowAddForm] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [search, setSearch] = useState("");
@@ -179,19 +373,19 @@ export default function AdventureMap() {
   const [nominatimResults, setNominatimResults] = useState([]);
   const [pendingPlace, setPendingPlace] = useState(null);
   const [shareNotice, setShareNotice] = useState(false);
-  const [mapCenter] = useState([40, 20]);
-  const [mapZoom] = useState(3);
   const searchTimeout = useRef(null);
   const [newSpot, setNewSpot] = useState({
     name:"", category:"nature", lat:"", lng:"",
     country:"", city:"", content:"",
     status:"want", rating:null, strollerFriendly:false, links:[], images:[], coverIndex:0,
+    timing: defaultTiming(),
   });
 
   const selectedSpot = spots.find(s => s.id === selectedSpotId);
   const getCat = (id) => CATEGORIES.find(c => c.id === id) || CATEGORIES[0];
   const today = () => new Date().toISOString().split("T")[0];
 
+  // STEP 1: basic filters (category / status / stroller / text search)
   const filtered = spots.filter(s => {
     if (!activeCategories.has(s.category)) return false;
     if (statusFilter !== "all" && s.status !== statusFilter) return false;
@@ -203,6 +397,23 @@ export default function AdventureMap() {
     }
     return true;
   });
+
+  // STEP 2: trip-date filter (the calendar). Adds _faded and hides "only" misses.
+  const displaySpots = useMemo(() => {
+    const list = filtered.map(s => {
+      const t = s.timing || defaultTiming();
+      let faded = false, visible = true;
+      if (tripFilter.active) {
+        const matches = timingMatchesTrip(t, tripFilter);
+        if (t.type === "only" && !matches) visible = false;
+        else if (t.type === "best" && !matches) faded = true;
+      }
+      return { ...s, _faded: faded, _visible: visible };
+    }).filter(s => s._visible);
+    // faded ones sink to the bottom of lists
+    list.sort((a, b) => (a._faded ? 1 : 0) - (b._faded ? 1 : 0));
+    return list;
+  }, [filtered, tripFilter]);
 
   // Auth listener
   useEffect(() => {
@@ -218,14 +429,6 @@ export default function AdventureMap() {
       setLoading(false);
     });
     return () => unsub();
-  }, []);
-
-  // Leaflet is loaded via npm/react-leaflet, just need window.L for custom icons
-  useEffect(() => {
-    if (!window.L) {
-      // L is available via react-leaflet internals
-      import("leaflet").then(L => { window.L = L.default || L; });
-    }
   }, []);
 
   const signIn = async () => { try { await signInWithPopup(auth, googleProvider); } catch (e) { console.error(e); } };
@@ -283,7 +486,7 @@ export default function AdventureMap() {
     const spot = { ...newSpot, id: Date.now(), lat: parseFloat(newSpot.lat), lng: parseFloat(newSpot.lng), visitedDate: newSpot.status === "visited" ? today() : null, updatedAt: today() };
     await addDoc(collection(db, "spots"), spot);
     setShowAddForm(false);
-    setNewSpot({ name:"", category:"nature", lat:"", lng:"", country:"", city:"", content:"", status:"want", rating:null, strollerFriendly:false, links:[], images:[], coverIndex:0 });
+    setNewSpot({ name:"", category:"nature", lat:"", lng:"", country:"", city:"", content:"", status:"want", rating:null, strollerFriendly:false, links:[], images:[], coverIndex:0, timing: defaultTiming() });
   };
 
   const toggleVisited = async (id) => {
@@ -362,10 +565,13 @@ export default function AdventureMap() {
     .chip{padding:4px 11px;border-radius:16px;font-size:12px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text-mid);transition:all .18s;font-family:var(--fb)}
     .chip:hover{border-color:var(--text-mid);color:var(--text)}
     .chip.on{background:var(--accent);color:white;border-color:var(--accent)}
+    select.chip{padding:4px 8px}
 
     .map-main{display:grid;grid-template-columns:1fr 420px;flex:1;overflow:hidden}
     .map-wrap{position:relative;overflow:hidden}
-    .leaflet-container{width:100%;height:100%}
+    .gmap-wrap{width:100%;height:100%;position:relative}
+    .gmap{width:100%;height:100%}
+    .gmap-keynote{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:5;background:#fff4f4;border:1px solid #e8bfbb;color:#9b5650;padding:8px 16px;border-radius:10px;font-size:13px;font-family:var(--fb);max-width:90%;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,0.08)}
     .sb{border-left:1px solid var(--border);overflow-y:auto;background:var(--bg)}
 
     .gallery-view{flex:1;overflow-y:auto;padding:28px 32px}
@@ -382,6 +588,7 @@ export default function AdventureMap() {
     .gallery-card-tag{padding:2px 8px;border-radius:10px;font-size:11px;border:1px solid var(--border);color:var(--text-mid)}
     .gallery-card-tag.visited{background:#f0f7f1;border-color:#b8d8bc;color:#4a7c50}
     .gallery-card-tag.want{background:#fdf0ef;border-color:#e8bfbb;color:#9b5650}
+    .gallery-card.faded{opacity:.5}
 
     .spot-page{flex:1;overflow-y:auto;animation:fi .25s ease}
     .spot-hero{position:relative;width:100%;height:300px;background:var(--bg-panel);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0}
@@ -405,6 +612,7 @@ export default function AdventureMap() {
     .tag.active{background:var(--accent);color:white;border-color:var(--accent)}
     .tag.plain{cursor:default}
     .tag.plain:hover{border-color:var(--border)}
+    .tag.timing{cursor:default;background:#f3f6fb;border-color:#cdddf2;color:#3f6699}
     .dates-row{font-size:12px;color:var(--text-light);margin-bottom:18px;display:flex;gap:14px;flex-wrap:wrap}
     .dates-row strong{font-weight:500;color:var(--text-mid)}
 
@@ -427,7 +635,6 @@ export default function AdventureMap() {
     .photo-add{aspect-ratio:4/3;border:1px dashed var(--border);border-radius:10px;background:var(--bg-soft);color:var(--text-light);font-size:24px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
     .photo-add:hover{border-color:var(--text-mid);color:var(--text);background:var(--bg)}
 
-    /* QUILL EDITOR OVERRIDES */
     .quill-wrap{margin-bottom:22px;border:1px solid var(--border);border-radius:8px;overflow:hidden}
     .quill-wrap .ql-toolbar{background:var(--bg-soft);border:none;border-bottom:1px solid var(--border);font-family:var(--fb)}
     .quill-wrap .ql-container{border:none;font-family:var(--fb);font-size:15px}
@@ -459,6 +666,7 @@ export default function AdventureMap() {
     .list-cnt{font-size:11px;color:var(--text-light);letter-spacing:.08em;font-family:var(--fb);display:block;margin-top:3px}
     .si{padding:13px 22px;border-bottom:1px solid var(--border-soft);cursor:pointer;transition:background .13s;display:flex;align-items:flex-start;gap:12px}
     .si:hover{background:var(--bg-soft)}
+    .si.faded{opacity:.5}
     .si-name{font-family:var(--fd);font-size:17px;font-weight:500;color:var(--text);line-height:1.2}
     .si-sub{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-light);margin-top:3px}
     .si-dot{width:7px;height:7px;border-radius:50%;margin-top:7px;flex-shrink:0;margin-left:auto;background:var(--accent)}
@@ -478,11 +686,6 @@ export default function AdventureMap() {
     .factions{display:flex;gap:10px;margin-top:18px}
     .hint{font-size:11px;color:var(--text-light);margin-top:-3px;margin-bottom:10px;line-height:1.5}
 
-    .pin-marker{width:12px;height:12px;border-radius:50%;background:white;border:1.5px solid #333;display:flex;align-items:center;justify-content:center;font-size:7px;box-shadow:0 2px 6px rgba(0,0,0,0.18);cursor:pointer;transition:transform .15s}
-    .pin-marker:hover{transform:scale(1.4)}
-    .leaflet-marker-icon.leaflet-div-icon{background:transparent;border:none}
-    .leaflet-popup-content-wrapper{font-family:var(--fb);font-size:13px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.12)}
-
     .add-btn{position:absolute;bottom:22px;right:22px;width:44px;height:44px;border-radius:50%;background:var(--accent);color:white;border:none;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(0,0,0,.18);transition:transform .18s;z-index:999;font-family:var(--fb)}
     .add-btn:hover{transform:scale(1.08)}
     .map-hint{position:absolute;top:14px;left:50%;transform:translateX(-50%);background:rgba(26,26,26,0.85);color:white;padding:7px 16px;border-radius:22px;font-size:13px;font-family:var(--fb);pointer-events:none;backdrop-filter:blur(4px);z-index:999;white-space:nowrap}
@@ -501,7 +704,9 @@ export default function AdventureMap() {
     }
   `;
 
-  const hasActiveFilters = activeCategories.size < CATEGORIES.length || statusFilter !== "all" || strollerFilter;
+  const hasActiveFilters = activeCategories.size < CATEGORIES.length || statusFilter !== "all" || strollerFilter || tripFilter.active;
+  const timingTag = !editing && selectedSpot ? formatTiming(selectedSpot.timing) : null;
+  const fullTimingTag = spot ? formatTiming(spot.timing) : null;
 
   return (
     <>
@@ -599,9 +804,9 @@ export default function AdventureMap() {
         {view !== "spot" && (
           <div className="filter-bar">
             <button className={`filter-toggle ${showFilters||hasActiveFilters?"on":""}`} onClick={()=>setShowFilters(f=>!f)}>
-              ⚙ Filters {hasActiveFilters&&`(${[activeCategories.size<CATEGORIES.length,statusFilter!=="all",strollerFilter].filter(Boolean).length})`}
+              ⚙ Filters {hasActiveFilters&&`(${[activeCategories.size<CATEGORIES.length,statusFilter!=="all",strollerFilter,tripFilter.active].filter(Boolean).length})`}
             </button>
-            <span className="filter-count">{filtered.length} {filtered.length===1?"spot":"spots"}</span>
+            <span className="filter-count">{displaySpots.length} {displaySpots.length===1?"spot":"spots"}</span>
           </div>
         )}
         {showFilters && view !== "spot" && (
@@ -625,6 +830,23 @@ export default function AdventureMap() {
               <span className="fl">Other</span>
               <button className={`chip ${strollerFilter?"on":""}`} onClick={()=>setStrollerFilter(f=>!f)}>🍼 Stroller</button>
             </div>
+            <div className="fg">
+              <span className="fl">🗓 When are you visiting?</span>
+              <button className={`chip ${tripFilter.active?"on":""}`} onClick={()=>setTripFilter(p=>({...p,active:!p.active}))}>
+                {tripFilter.active?"Trip dates on":"Off"}
+              </button>
+              {tripFilter.active && (
+                <>
+                  <select className="chip" value={tripFilter.startMonth} onChange={e=>setTripFilter(p=>({...p,startMonth:+e.target.value}))}>
+                    {MONTHS.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
+                  </select>
+                  <span style={{color:"var(--text-light)",fontSize:12}}>–</span>
+                  <select className="chip" value={tripFilter.endMonth} onChange={e=>setTripFilter(p=>({...p,endMonth:+e.target.value}))}>
+                    {MONTHS.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
+                  </select>
+                </>
+              )}
+            </div>
           </div>
         )}
 
@@ -632,17 +854,13 @@ export default function AdventureMap() {
         {view === "map" && (
           <div className="map-main">
             <div className="map-wrap">
-              <MapContainer center={mapCenter} zoom={mapZoom} style={{width:"100%",height:"100%"}} zoomControl={true}>
-                <TileLayer
-                  url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
-                  attribution='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/">CARTO</a>'
-                />
-                <MapClickHandler onMapClick={handleMapClick}/>
-                {filtered.map(s => (
-                  window.L ? <SpotMarker key={s.id} spot={s} getCat={getCat} onClick={openSpot}/> : null
-                ))}
-                {pendingPlace && window.L && <PendingMarker place={pendingPlace}/>}
-              </MapContainer>
+              <GoogleMapView
+                spots={displaySpots}
+                pendingPlace={pendingPlace}
+                onMapClick={handleMapClick}
+                onMarkerClick={openSpot}
+                getCat={getCat}
+              />
 
               {showAddForm && <div className="map-hint">👆 Click on the map to place your spot</div>}
 
@@ -699,6 +917,10 @@ export default function AdventureMap() {
                       <option value="visited">✅ Already visited</option>
                     </select>
                   </div>
+                  <div className="fg2">
+                    <label className="flbl">🗓 When is it worth visiting?</label>
+                    <TimingEditor timing={newSpot.timing} onChange={tg=>setNewSpot(p=>({...p,timing:tg}))}/>
+                  </div>
                   <label className="fchk"><input type="checkbox" checked={newSpot.strollerFriendly} onChange={e=>setNewSpot(p=>({...p,strollerFriendly:e.target.checked}))}/> 🍼 Stroller friendly</label>
                   <div className="factions">
                     <button className="btn p" onClick={addSpot}>Save spot</button>
@@ -715,7 +937,6 @@ export default function AdventureMap() {
                     )}
                     <div style={{position:"absolute",inset:0,background:"linear-gradient(to bottom,transparent 40%,rgba(0,0,0,0.4) 100%)",pointerEvents:"none"}}/>
                     <button onClick={()=>setSelectedSpotId(null)} style={{position:"absolute",top:10,left:12,background:"rgba(255,255,255,0.9)",border:"none",cursor:"pointer",fontSize:"12px",color:"var(--text)",fontFamily:"var(--fb)",padding:"5px 11px",borderRadius:"14px",backdropFilter:"blur(6px)"}}>← Back</button>
-                    {/* Small full page icon button — top right */}
                     <button onClick={()=>openFullPage(selectedSpot.id)}
                       title="Open full page"
                       style={{position:"absolute",top:10,right:12,background:"rgba(255,255,255,0.9)",border:"none",cursor:"pointer",width:30,height:30,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)",color:"var(--text)",transition:"all .15s"}}>
@@ -732,6 +953,7 @@ export default function AdventureMap() {
                       <span className={`tag ${selectedSpot.status==="visited"?"active":""}`} onClick={()=>toggleVisited(selectedSpot.id)}>
                         {selectedSpot.status==="visited"?"✅ Visited":"🌟 Want to go"}
                       </span>
+                      {timingTag && <span className="tag timing">🗓 {timingTag}</span>}
                       {selectedSpot.strollerFriendly&&<span className="tag plain">🍼</span>}
                       <div style={{marginLeft:"auto"}}><StarRating rating={selectedSpot.rating} onRate={r=>updateSpot(selectedSpot.id,"rating",r)} readonly={selectedSpot.status!=="visited"}/></div>
                     </div>
@@ -743,17 +965,18 @@ export default function AdventureMap() {
                 </div>
               ) : (
                 <div>
-                  <div className="list-hdr">Your spots<span className="list-cnt">{loading?"Loading…":`${filtered.length} ${filtered.length===1?"place":"places"} showing`}</span></div>
-                  {filtered.length===0&&!loading ? (
+                  <div className="list-hdr">Your spots<span className="list-cnt">{loading?"Loading…":`${displaySpots.length} ${displaySpots.length===1?"place":"places"} showing`}</span></div>
+                  {displaySpots.length===0&&!loading ? (
                     <div style={{padding:"28px 22px",textAlign:"center",color:"var(--text-light)",fontSize:"14px",lineHeight:1.7}}>No spots match.<br/>Try adjusting filters or add a new spot!</div>
-                  ) : filtered.map(s => {
+                  ) : displaySpots.map(s => {
                     const cat = getCat(s.category);
+                    const tg = formatTiming(s.timing);
                     return (
-                      <div key={s.id} className="si" onClick={()=>openSpot(s.id)}>
+                      <div key={s.id} className={`si ${s._faded?"faded":""}`} onClick={()=>openSpot(s.id)}>
                         <span style={{fontSize:"20px",flexShrink:0,marginTop:2}}>{cat.emoji}</span>
                         <div style={{flex:1,minWidth:0}}>
                           <div className="si-name">{s.name}</div>
-                          <div className="si-sub">{s.city}{s.city&&s.country?" · ":""}{s.country}</div>
+                          <div className="si-sub">{s.city}{s.city&&s.country?" · ":""}{s.country}{tg?` · ${tg}`:""}</div>
                           {s.rating&&<div style={{marginTop:4}}><StarRating rating={s.rating} readonly/></div>}
                         </div>
                         <div className={`si-dot ${s.status==="want"?"want":""}`}/>
@@ -770,11 +993,12 @@ export default function AdventureMap() {
         {view === "gallery" && (
           <div className="gallery-view">
             <div className="gallery-grid-view">
-              {filtered.map(s => {
+              {displaySpots.map(s => {
                 const cat = getCat(s.category);
                 const cover = getCover(s);
+                const tg = formatTiming(s.timing);
                 return (
-                  <div key={s.id} className="gallery-card" onClick={()=>openFullPage(s.id)}>
+                  <div key={s.id} className={`gallery-card ${s._faded?"faded":""}`} onClick={()=>openFullPage(s.id)}>
                     <div className="gallery-card-cover">
                       {cover ? <img src={cover} alt={s.name} loading="lazy"/> : <div className="gallery-card-cover-empty">{cat.emoji}</div>}
                     </div>
@@ -783,6 +1007,7 @@ export default function AdventureMap() {
                       <div className="gallery-card-sub">{s.city}{s.city&&s.country?" · ":""}{s.country}</div>
                       <div className="gallery-card-tags">
                         <span className={`gallery-card-tag ${s.status}`}>{s.status==="visited"?"✅ Visited":"🌟 Want to go"}</span>
+                        {tg&&<span className="gallery-card-tag">🗓 {tg}</span>}
                         {s.strollerFriendly&&<span className="gallery-card-tag">🍼</span>}
                         <span className="gallery-card-tag">{cat.emoji} {cat.label}</span>
                       </div>
@@ -790,7 +1015,7 @@ export default function AdventureMap() {
                   </div>
                 );
               })}
-              {filtered.length===0&&(
+              {displaySpots.length===0&&(
                 <div style={{gridColumn:"1/-1",padding:"40px",textAlign:"center",color:"var(--text-light)",fontSize:"14px"}}>No spots match your filters.</div>
               )}
             </div>
@@ -855,6 +1080,7 @@ export default function AdventureMap() {
                     <span className={`tag ${spot.status==="visited"?"active":""}`} onClick={()=>toggleVisited(spot.id)}>
                       {spot.status==="visited"?"✅ Visited":"🌟 Want to go"}
                     </span>
+                    {fullTimingTag && <span className="tag timing">🗓 {fullTimingTag}</span>}
                     {spot.strollerFriendly&&<span className="tag plain">🍼 Stroller friendly</span>}
                     <div style={{marginLeft:"auto"}}>
                       <StarRating rating={spot.rating} onRate={r=>updateSpot(spot.id,"rating",r)} readonly={spot.status!=="visited"}/>
@@ -876,6 +1102,10 @@ export default function AdventureMap() {
                     <div style={{display:"flex",alignItems:"flex-end",paddingBottom:4}}>
                       <label className="edit-check"><input type="checkbox" checked={editDraft.strollerFriendly||false} onChange={e=>updateDraft("strollerFriendly",e.target.checked)}/> 🍼 Stroller</label>
                     </div>
+                  </div>
+                  <div style={{marginTop:14}}>
+                    <label className="edit-label">🗓 When is it worth visiting?</label>
+                    <TimingEditor timing={editDraft.timing} onChange={tg=>updateDraft("timing",tg)} inputClass="edit-input"/>
                   </div>
                 </div>
               )}
