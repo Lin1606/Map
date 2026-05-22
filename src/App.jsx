@@ -24,7 +24,7 @@ const googleProvider = new GoogleAuthProvider();
 // 👇👇👇 HIER deinen eingeschränkten Maps API Key zwischen die
 //        Anführungszeichen einsetzen (die " " müssen bleiben!)
 // ============================================================
-const GOOGLE_MAPS_API_KEY = "PASTE_YOUR_MAPS_KEY_HERE";
+const GOOGLE_MAPS_API_KEY = "AIzaSyChVCf5wrydzuAAuoFkUjOB8h9OaRA5Q5U";
 
 // TWO MAP MODES:
 // OVERVIEW = calm, almost colourless, your spots stand out. The default.
