@@ -24,21 +24,28 @@ const googleProvider = new GoogleAuthProvider();
 // 👇👇👇 HIER deinen eingeschränkten Maps API Key zwischen die
 //        Anführungszeichen einsetzen (die " " müssen bleiben!)
 // ============================================================
-const GOOGLE_MAPS_API_KEY = "AIzaSyChVCf5wrydzuAAuoFkUjOB8h9OaRA5Q5U";
+const GOOGLE_MAPS_API_KEY = "PASTE_YOUR_MAPS_KEY_HERE";
 
 // TWO MAP MODES:
 // OVERVIEW = calm, almost colourless, your spots stand out. The default.
 // FULL     = normal Google Maps with cafés, attractions, everything — for searching.
 
-// Overview: greyscale-ish, no POI/road/transit labels, but keeps city & country names.
+// Overview: just a LIGHT tidy-up. Keeps city/town names, country borders and
+// roads (so you stay oriented) — only hides the busy clutter: shop/business
+// labels and public-transport lines. Soft, friendly colours, not grey.
 const OVERVIEW_STYLE = [
-  { elementType: "geometry", stylers: [{ saturation: -100 }, { lightness: 15 }] },
-  { elementType: "labels.icon", stylers: [{ visibility: "off" }] },
-  { featureType: "poi", stylers: [{ visibility: "off" }] },
+  { elementType: "geometry", stylers: [{ color: "#f5f3ee" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#6b6657" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#ffffff" }, { weight: 2 }] },
+  { featureType: "poi.business", stylers: [{ visibility: "off" }] },
+  { featureType: "poi", elementType: "labels.icon", stylers: [{ visibility: "off" }] },
   { featureType: "transit", stylers: [{ visibility: "off" }] },
-  { featureType: "road", stylers: [{ visibility: "off" }] },
-  { featureType: "water", elementType: "geometry", stylers: [{ saturation: -70 }, { lightness: 30 }] },
-  { featureType: "poi.park", elementType: "geometry", stylers: [{ saturation: -80 }, { lightness: 25 }] },
+  { featureType: "road", elementType: "labels.icon", stylers: [{ visibility: "off" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#ffffff" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#f0e9d8" }] },
+  { featureType: "landscape.natural", elementType: "geometry", stylers: [{ color: "#eef0e6" }] },
+  { featureType: "poi.park", elementType: "geometry", stylers: [{ color: "#cfe3c8" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#aaccdd" }] },
 ];
 
 // Full: empty array = the normal, full-colour Google Maps with all places.
@@ -524,26 +531,37 @@ export default function AdventureMap() {
           body: JSON.stringify({ textQuery: val, maxResultCount: 5 }),
         });
         const data = await res.json();
-        setNominatimResults(data.places || []);
+        const places = data.places || [];
+        setNominatimResults(places);
+        // As soon as we have real places to look at, switch the map to the
+        // detailed "search" look so you can recognise where things are.
+        if (places.length > 0) setMapMode("full");
       } catch (e) { console.error(e); }
     }, 500);
   };
 
-  const flyToPlace = (place) => {
-    // Google Places returns: displayName.text, formattedAddress, location.latitude/longitude
+  // Pull city + country out of a Google address string.
+  const parsePlace = (place) => {
     const name = place.displayName?.text || place.formattedAddress?.split(",")[0] || "Place";
     const addr = place.formattedAddress || "";
     const parts = addr.split(",").map(s => s.trim());
     const country = parts.length ? parts[parts.length - 1] : "";
     const city = parts.length >= 2 ? parts[parts.length - 2].replace(/\d+/g, "").trim() : "";
-    setPendingPlace({
-      name,
-      lat: place.location.latitude,
-      lng: place.location.longitude,
-      city, country,
-    });
+    return { name, lat: place.location.latitude, lng: place.location.longitude, city, country };
+  };
+
+  // Click a Google result → fill the Add form automatically (no guessing!)
+  // and drop you straight into adding it.
+  const flyToPlace = (place) => {
+    const p = parsePlace(place);
+    setPendingPlace(p);                 // shows a pin + flies there
+    setNewSpot(prev => ({ ...prev, ...p }));   // pre-fills the form
+    setShowAddForm(true);
+    setSelectedSpotId(null);
     setSearch(""); setSearchResults([]); setNominatimResults([]);
+    setSearchOpen(false);
     setView("map");
+    setMapMode("full");                 // keep details visible while placing
   };
 
   const addPendingAsSpot = () => {
@@ -574,7 +592,16 @@ export default function AdventureMap() {
     const spot = { ...newSpot, id: Date.now(), lat: parseFloat(newSpot.lat), lng: parseFloat(newSpot.lng), visitedDate: newSpot.status === "visited" ? today() : null, updatedAt: today() };
     await addDoc(collection(db, "spots"), spot);
     setShowAddForm(false);
+    setPendingPlace(null);
+    setMapMode("overview");   // back to the calm overview after saving
     setNewSpot({ name:"", category:"nature", lat:"", lng:"", country:"", city:"", content:"", status:"want", rating:null, strollerFriendly:false, links:[], images:[], coverIndex:0, timing: defaultTiming() });
+  };
+
+  // Cancel adding → also go back to the calm overview
+  const cancelAdd = () => {
+    setShowAddForm(false);
+    setPendingPlace(null);
+    setMapMode("overview");
   };
 
   const toggleVisited = async (id) => {
@@ -984,7 +1011,7 @@ export default function AdventureMap() {
                 <div className="add-form">
                   <div className="add-form-hdr">
                     <div className="add-form-title">Add a new spot</div>
-                    <button className="close-btn" onClick={()=>setShowAddForm(false)}>×</button>
+                    <button className="close-btn" onClick={cancelAdd}>×</button>
                   </div>
                   <div className="fg2"><label className="flbl">Name *</label><input className="finp" placeholder="e.g. Arashiyama Bamboo Grove" value={newSpot.name} onChange={e=>setNewSpot(p=>({...p,name:e.target.value}))}/></div>
                   <div className="fg2">
@@ -1024,7 +1051,7 @@ export default function AdventureMap() {
                   <label className="fchk"><input type="checkbox" checked={newSpot.strollerFriendly} onChange={e=>setNewSpot(p=>({...p,strollerFriendly:e.target.checked}))}/> 🍼 Stroller friendly</label>
                   <div className="factions">
                     <button className="btn p" onClick={addSpot}>Save spot</button>
-                    <button className="btn" onClick={()=>setShowAddForm(false)}>Cancel</button>
+                    <button className="btn" onClick={cancelAdd}>Cancel</button>
                   </div>
                 </div>
               ) : selectedSpot ? (
