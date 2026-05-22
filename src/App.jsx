@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { initializeApp } from "firebase/app";
-import { getFirestore, collection, addDoc, updateDoc, doc, onSnapshot } from "firebase/firestore";
+import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot } from "firebase/firestore";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
 
 // ============================================================
@@ -32,20 +32,25 @@ const GOOGLE_MAPS_API_KEY = "AIzaSyChVCf5wrydzuAAuoFkUjOB8h9OaRA5Q5U";
 
 // Overview: just a LIGHT tidy-up. Keeps city/town names, country borders and
 // roads (so you stay oriented) — only hides the busy clutter: shop/business
-// labels and public-transport lines. Soft, friendly colours, not grey.
+// labels and public-transport lines. Soft colours, and — like the normal map —
+// built-up/city areas look different from nature so you can tell them apart.
 const OVERVIEW_STYLE = [
-  { elementType: "geometry", stylers: [{ color: "#f5f3ee" }] },
-  { elementType: "labels.text.fill", stylers: [{ color: "#6b6657" }] },
-  { elementType: "labels.text.stroke", stylers: [{ color: "#ffffff" }, { weight: 2 }] },
+  { elementType: "geometry", stylers: [{ color: "#eceae3" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#1a1a1a" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#ffffff" }, { weight: 3 }] },
   { featureType: "poi.business", stylers: [{ visibility: "off" }] },
   { featureType: "poi", elementType: "labels.icon", stylers: [{ visibility: "off" }] },
   { featureType: "transit", stylers: [{ visibility: "off" }] },
   { featureType: "road", elementType: "labels.icon", stylers: [{ visibility: "off" }] },
   { featureType: "road", elementType: "geometry", stylers: [{ color: "#ffffff" }] },
-  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#f0e9d8" }] },
-  { featureType: "landscape.natural", elementType: "geometry", stylers: [{ color: "#eef0e6" }] },
-  { featureType: "poi.park", elementType: "geometry", stylers: [{ color: "#cfe3c8" }] },
-  { featureType: "water", elementType: "geometry", stylers: [{ color: "#aaccdd" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#f3e9d2" }] },
+  // built-up / city areas — slightly warm grey so they read as "town"
+  { featureType: "landscape.man_made", elementType: "geometry", stylers: [{ color: "#e2ded3" }] },
+  // open nature — soft green
+  { featureType: "landscape.natural", elementType: "geometry", stylers: [{ color: "#dce8cf" }] },
+  // parks / forests — a touch stronger green
+  { featureType: "poi.park", elementType: "geometry", stylers: [{ color: "#c2dcae" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#a9cbdd" }] },
 ];
 
 // Full: empty array = the normal, full-colour Google Maps with all places.
@@ -587,6 +592,18 @@ export default function AdventureMap() {
 
   const updateDraft = (field, value) => setEditDraft(p => ({ ...p, [field]: value }));
 
+  // Delete a spot — asks for confirmation first so nothing vanishes by accident.
+  const deleteSpot = async (spotToDelete) => {
+    if (!spotToDelete || !spotToDelete.firestoreId) return;
+    const ok = window.confirm(`Delete "${spotToDelete.name}"? This can't be undone.`);
+    if (!ok) return;
+    await deleteDoc(doc(db, "spots", spotToDelete.firestoreId));
+    // close any open views of this spot
+    setEditing(false); setEditDraft(null);
+    setSelectedSpotId(null);
+    setView("map");
+  };
+
   const addSpot = async () => {
     if (!newSpot.name || !newSpot.lat || !newSpot.lng) return;
     const spot = { ...newSpot, id: Date.now(), lat: parseFloat(newSpot.lat), lng: parseFloat(newSpot.lng), visitedDate: newSpot.status === "visited" ? today() : null, updatedAt: today() };
@@ -770,6 +787,8 @@ export default function AdventureMap() {
     .edit-check{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text);cursor:pointer}
 
     .links-section{margin-bottom:24px}
+    .hero-btn.delete{background:rgba(253,240,239,0.95);border-color:#e8bfbb;color:#b5564e}
+    .hero-btn.delete:hover{background:#fce4e2}
     .slbl{font-size:11px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--text-light);margin-bottom:8px;display:block}
     .link-item{display:flex;align-items:center;gap:10px;padding:10px 13px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;transition:all .15s;text-decoration:none;color:var(--text);font-size:14px;background:var(--bg)}
     .link-item:hover{border-color:var(--text-mid);background:var(--bg-soft)}
@@ -1169,7 +1188,7 @@ export default function AdventureMap() {
                   {!editing ? (
                     <button className="hero-btn primary" onClick={startEditing}>✎ Edit</button>
                   ) : (
-                    <><button className="hero-btn" onClick={cancelEditing}>Cancel</button><button className="hero-btn primary" onClick={saveEditing}>Save</button></>
+                    <><button className="hero-btn delete" onClick={()=>deleteSpot(editDraft)}>Delete</button><button className="hero-btn" onClick={cancelEditing}>Cancel</button><button className="hero-btn primary" onClick={saveEditing}>Save</button></>
                   )}
                 </div>
               </div>
