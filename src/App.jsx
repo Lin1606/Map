@@ -26,15 +26,25 @@ const googleProvider = new GoogleAuthProvider();
 // ============================================================
 const GOOGLE_MAPS_API_KEY = "AIzaSyChVCf5wrydzuAAuoFkUjOB8h9OaRA5Q5U";
 
-// This is what makes the map calmer: it hides shop/business names,
-// public-transport labels and road/highway names — but keeps the
-// familiar country & city names so it still feels like Google Maps.
-const CLEAN_MAP_STYLE = [
-  { featureType: "poi", elementType: "labels", stylers: [{ visibility: "off" }] },
-  { featureType: "poi.business", stylers: [{ visibility: "off" }] },
+// TWO MAP MODES:
+// OVERVIEW = calm, almost colourless, your spots stand out. The default.
+// FULL     = normal Google Maps with cafés, attractions, everything — for searching.
+
+// Overview: greyscale-ish, no POI/road/transit labels, but keeps city & country names.
+const OVERVIEW_STYLE = [
+  { elementType: "geometry", stylers: [{ saturation: -100 }, { lightness: 15 }] },
+  { elementType: "labels.icon", stylers: [{ visibility: "off" }] },
+  { featureType: "poi", stylers: [{ visibility: "off" }] },
   { featureType: "transit", stylers: [{ visibility: "off" }] },
-  { featureType: "road", elementType: "labels", stylers: [{ visibility: "off" }] },
+  { featureType: "road", stylers: [{ visibility: "off" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ saturation: -70 }, { lightness: 30 }] },
+  { featureType: "poi.park", elementType: "geometry", stylers: [{ saturation: -80 }, { lightness: 25 }] },
 ];
+
+// Full: empty array = the normal, full-colour Google Maps with all places.
+const FULL_STYLE = [];
+
+const MAP_STYLES = { overview: OVERVIEW_STYLE, full: FULL_STYLE };
 
 // Loads the Google Maps script once, then remembers it's loaded.
 let googleMapsPromise = null;
@@ -145,42 +155,59 @@ function StarRating({ rating, onRate, readonly = false }) {
 // ============================================================
 function TimingEditor({ timing, onChange, inputClass = "finp" }) {
   const t = timing || defaultTiming();
-  const set = (patch) => onChange({ ...t, ...patch });
+  const allYear = t.type === "all";
+  const startMonth = t.startMonth || 1;
+  const endMonth = t.endMonth || 12;
+  const startDay = t.mode === "date" ? (t.startDay ?? null) : null;
+  const endDay = t.mode === "date" ? (t.endDay ?? null) : null;
+
+  // The clever bit: if BOTH a start day and end day are picked → exact dates.
+  // If you only pick months (days left on "any") → it's a season. Auto-detected.
+  const apply = (sm, sd, em, ed) => {
+    const hasDays = sd != null && ed != null;
+    onChange({
+      startMonth: sm, endMonth: em, startDay: sd, endDay: ed,
+      type: hasDays ? "only" : "best",
+      mode: hasDays ? "date" : "range",
+    });
+  };
+
+  const hint = allYear ? null
+    : (startDay != null && endDay != null)
+      ? "→ Exact dates — hidden if your trip misses them."
+      : "→ A season — just fades when you travel outside it.";
+
   return (
     <div>
-      <select className={inputClass} value={t.type} onChange={e => set({ type: e.target.value })}>
-        <option value="all">🗓 Good all year</option>
-        <option value="best">🌤 Best in a season</option>
-        <option value="only">🎏 Only on specific dates</option>
-      </select>
-      {t.type !== "all" && (
-        <div style={{ marginTop: 8 }}>
-          <select className={inputClass} style={{ marginBottom: 8 }} value={t.mode} onChange={e => set({ mode: e.target.value })}>
-            <option value="range">A range of months</option>
-            <option value="date">Specific days</option>
-          </select>
+      <label className="fchk" style={{ marginBottom: allYear ? 0 : 12 }}>
+        <input type="checkbox" checked={allYear}
+          onChange={e => e.target.checked ? onChange(defaultTiming()) : apply(startMonth, null, endMonth, null)} />
+        🗓 Good all year
+      </label>
+
+      {!allYear && (
+        <div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-            <span style={{ fontSize: 12, color: "var(--text-light)", width: 38 }}>From</span>
-            <select className={inputClass} value={t.startMonth} onChange={e => set({ startMonth: +e.target.value })}>
+            <span style={{ fontSize: 12, color: "var(--text-light)", width: 42 }}>From</span>
+            <select className={inputClass} value={startMonth} onChange={e => apply(+e.target.value, startDay, endMonth, endDay)}>
               {MONTHS.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
             </select>
-            {t.mode === "date" && (
-              <select className={inputClass} value={t.startDay} onChange={e => set({ startDay: +e.target.value })}>
-                {Array.from({ length: MONTH_DAYS[t.startMonth - 1] }, (_, i) => <option key={i} value={i + 1}>{i + 1}</option>)}
-              </select>
-            )}
+            <select className={inputClass} value={startDay ?? ""} onChange={e => apply(startMonth, e.target.value === "" ? null : +e.target.value, endMonth, endDay)}>
+              <option value="">any day</option>
+              {Array.from({ length: MONTH_DAYS[startMonth - 1] }, (_, i) => <option key={i} value={i + 1}>{i + 1}</option>)}
+            </select>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 12, color: "var(--text-light)", width: 38 }}>To</span>
-            <select className={inputClass} value={t.endMonth} onChange={e => set({ endMonth: +e.target.value })}>
+            <span style={{ fontSize: 12, color: "var(--text-light)", width: 42 }}>To</span>
+            <select className={inputClass} value={endMonth} onChange={e => apply(startMonth, startDay, +e.target.value, endDay)}>
               {MONTHS.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
             </select>
-            {t.mode === "date" && (
-              <select className={inputClass} value={t.endDay} onChange={e => set({ endDay: +e.target.value })}>
-                {Array.from({ length: MONTH_DAYS[t.endMonth - 1] }, (_, i) => <option key={i} value={i + 1}>{i + 1}</option>)}
-              </select>
-            )}
+            <select className={inputClass} value={endDay ?? ""} onChange={e => apply(startMonth, startDay, endMonth, e.target.value === "" ? null : +e.target.value)}>
+              <option value="">any day</option>
+              {Array.from({ length: MONTH_DAYS[endMonth - 1] }, (_, i) => <option key={i} value={i + 1}>{i + 1}</option>)}
+            </select>
           </div>
+          <div style={{ fontSize: 11, color: "var(--text-light)", marginTop: 8, lineHeight: 1.4 }}>{hint}</div>
         </div>
       )}
     </div>
@@ -243,11 +270,12 @@ function QuillEditor({ content, onChange }) {
 // 🗺 GOOGLE MAP VIEW — replaces the old Leaflet map
 // Draws the map, the spot pins, and the blue "pending" marker.
 // ============================================================
-function GoogleMapView({ spots, pendingPlace, onMapClick, onMarkerClick, getCat }) {
+function GoogleMapView({ spots, pendingPlace, draftPoint, onMapClick, onMarkerClick, getCat, mode }) {
   const mapRef = useRef(null);        // the <div> the map draws into
   const mapObj = useRef(null);        // the google.maps.Map instance
   const markers = useRef([]);         // current spot pins
   const pendingMarker = useRef(null); // the blue search pin
+  const draftMarker = useRef(null);   // the pin shown while placing a new spot
   const onMapClickRef = useRef(onMapClick);
   const [ready, setReady] = useState(false);
 
@@ -270,8 +298,8 @@ function GoogleMapView({ spots, pendingPlace, onMapClick, onMarkerClick, getCat 
         mapObj.current = new g.maps.Map(mapRef.current, {
           center: { lat: 40, lng: 20 },
           zoom: 3,
-          styles: CLEAN_MAP_STYLE,
-          clickableIcons: false,
+          styles: MAP_STYLES[mode] || OVERVIEW_STYLE,
+          clickableIcons: mode === "full",
           mapTypeControl: false,
           streetViewControl: false,
           fullscreenControl: false,
@@ -285,6 +313,15 @@ function GoogleMapView({ spots, pendingPlace, onMapClick, onMarkerClick, getCat 
       .catch((err) => console.error(err));
     return () => { cancelled = true; };
   }, []);
+
+  // switch the map style live when the mode toggle changes
+  useEffect(() => {
+    if (!ready || !mapObj.current) return;
+    mapObj.current.setOptions({
+      styles: MAP_STYLES[mode] || OVERVIEW_STYLE,
+      clickableIcons: mode === "full",
+    });
+  }, [mode, ready]);
 
   // 2) redraw the spot pins whenever the spots change
   useEffect(() => {
@@ -338,6 +375,28 @@ function GoogleMapView({ spots, pendingPlace, onMapClick, onMarkerClick, getCat 
     }
   }, [pendingPlace, ready]);
 
+  // 4) the pin shown at the spot you're currently placing (click-to-add)
+  useEffect(() => {
+    if (!ready) return;
+    const g = window.google;
+    if (draftMarker.current) { draftMarker.current.setMap(null); draftMarker.current = null; }
+    if (draftPoint) {
+      draftMarker.current = new g.maps.Marker({
+        position: { lat: draftPoint.lat, lng: draftPoint.lng },
+        map: mapObj.current,
+        zIndex: 9999,
+        icon: {
+          path: g.maps.SymbolPath.CIRCLE,
+          fillColor: "#333333",
+          fillOpacity: 1,
+          strokeColor: "#ffffff",
+          strokeWeight: 3,
+          scale: 9,
+        },
+      });
+    }
+  }, [draftPoint, ready]);
+
   return (
     <div className="gmap-wrap">
       {GOOGLE_MAPS_API_KEY === "PASTE_YOUR_MAPS_KEY_HERE" && (
@@ -363,7 +422,7 @@ export default function AdventureMap() {
   const [activeCategories, setActiveCategories] = useState(new Set(CATEGORIES.map(c => c.id)));
   const [statusFilter, setStatusFilter] = useState("all");
   const [strollerFilter, setStrollerFilter] = useState(false);
-  const [tripFilter, setTripFilter] = useState({ active: false, startMonth: 1, startDay: 1, endMonth: 12, endDay: 31 });
+  const [tripFilter, setTripFilter] = useState({ active: false, start: "", end: "" });
   const [showAddForm, setShowAddForm] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [search, setSearch] = useState("");
@@ -372,6 +431,7 @@ export default function AdventureMap() {
   const [searchFocused, setSearchFocused] = useState(false);
   const [nominatimResults, setNominatimResults] = useState([]);
   const [pendingPlace, setPendingPlace] = useState(null);
+  const [mapMode, setMapMode] = useState("overview");
   const [shareNotice, setShareNotice] = useState(false);
   const searchTimeout = useRef(null);
   const [newSpot, setNewSpot] = useState({
@@ -400,11 +460,20 @@ export default function AdventureMap() {
 
   // STEP 2: trip-date filter (the calendar). Adds _faded and hides "only" misses.
   const displaySpots = useMemo(() => {
+    // turn the two picked calendar dates into a {month,day} trip we can compare
+    const tripActive = tripFilter.active && tripFilter.start && tripFilter.end;
+    let trip = null;
+    if (tripActive) {
+      trip = {
+        startMonth: +tripFilter.start.slice(5, 7), startDay: +tripFilter.start.slice(8, 10),
+        endMonth: +tripFilter.end.slice(5, 7), endDay: +tripFilter.end.slice(8, 10),
+      };
+    }
     const list = filtered.map(s => {
       const t = s.timing || defaultTiming();
       let faded = false, visible = true;
-      if (tripFilter.active) {
-        const matches = timingMatchesTrip(t, tripFilter);
+      if (trip) {
+        const matches = timingMatchesTrip(t, trip);
         if (t.type === "only" && !matches) visible = false;
         else if (t.type === "best" && !matches) faded = true;
       }
@@ -440,20 +509,39 @@ export default function AdventureMap() {
     const q = val.toLowerCase();
     setSearchResults(spots.filter(s => `${s.name} ${s.city||""} ${s.country||""}`.toLowerCase().includes(q)).slice(0, 4));
     clearTimeout(searchTimeout.current);
+    // Wait until you've stopped typing for 500ms, then do ONE Google search.
+    // This keeps the number of paid calls tiny.
     searchTimeout.current = setTimeout(async () => {
       try {
-        const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(val)}&format=json&limit=4&addressdetails=1`);
+        const res = await fetch("https://places.googleapis.com/v1/places:searchText", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+            // only ask for the fields we use → keeps it in the cheapest tier
+            "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location",
+          },
+          body: JSON.stringify({ textQuery: val, maxResultCount: 5 }),
+        });
         const data = await res.json();
-        setNominatimResults(data);
+        setNominatimResults(data.places || []);
       } catch (e) { console.error(e); }
     }, 500);
   };
 
   const flyToPlace = (place) => {
-    const city = place.address?.city || place.address?.town || place.address?.village || place.address?.county || "";
-    const country = place.address?.country || "";
-    const name = place.name || place.display_name.split(",")[0];
-    setPendingPlace({ name, lat: parseFloat(place.lat), lng: parseFloat(place.lon), city, country });
+    // Google Places returns: displayName.text, formattedAddress, location.latitude/longitude
+    const name = place.displayName?.text || place.formattedAddress?.split(",")[0] || "Place";
+    const addr = place.formattedAddress || "";
+    const parts = addr.split(",").map(s => s.trim());
+    const country = parts.length ? parts[parts.length - 1] : "";
+    const city = parts.length >= 2 ? parts[parts.length - 2].replace(/\d+/g, "").trim() : "";
+    setPendingPlace({
+      name,
+      lat: place.location.latitude,
+      lng: place.location.longitude,
+      city, country,
+    });
     setSearch(""); setSearchResults([]); setNominatimResults([]);
     setView("map");
   };
@@ -566,6 +654,8 @@ export default function AdventureMap() {
     .chip:hover{border-color:var(--text-mid);color:var(--text)}
     .chip.on{background:var(--accent);color:white;border-color:var(--accent)}
     select.chip{padding:4px 8px}
+    .trip-date{padding:4px 10px;border-radius:16px;font-size:12px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-family:var(--fb);cursor:pointer;outline:none}
+    .trip-date:focus{border-color:var(--text-mid)}
 
     .map-main{display:grid;grid-template-columns:1fr 420px;flex:1;overflow:hidden}
     .map-wrap{position:relative;overflow:hidden}
@@ -613,6 +703,8 @@ export default function AdventureMap() {
     .tag.plain{cursor:default}
     .tag.plain:hover{border-color:var(--border)}
     .tag.timing{cursor:default;background:#f3f6fb;border-color:#cdddf2;color:#3f6699}
+    .tag.dir{background:#eef6f0;border-color:#bfddc6;color:#3f7a52;text-decoration:none;cursor:pointer}
+    .tag.dir:hover{background:#e3f0e7;border-color:#9ecaa8}
     .dates-row{font-size:12px;color:var(--text-light);margin-bottom:18px;display:flex;gap:14px;flex-wrap:wrap}
     .dates-row strong{font-weight:500;color:var(--text-mid)}
 
@@ -685,6 +777,9 @@ export default function AdventureMap() {
     .fchk{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text);cursor:pointer}
     .factions{display:flex;gap:10px;margin-top:18px}
     .hint{font-size:11px;color:var(--text-light);margin-top:-3px;margin-bottom:10px;line-height:1.5}
+
+    .map-mode-toggle{position:absolute;top:14px;left:14px;z-index:5;background:rgba(255,255,255,0.95);border:1px solid var(--border);border-radius:22px;padding:7px 14px;font-family:var(--fb);font-size:13px;color:var(--text);cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,0.1);backdrop-filter:blur(6px);transition:all .15s}
+    .map-mode-toggle:hover{background:#fff;border-color:var(--text-mid)}
 
     .add-btn{position:absolute;bottom:22px;right:22px;width:44px;height:44px;border-radius:50%;background:var(--accent);color:white;border:none;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(0,0,0,.18);transition:transform .18s;z-index:999;font-family:var(--fb)}
     .add-btn:hover{transform:scale(1.08)}
@@ -782,8 +877,8 @@ export default function AdventureMap() {
                               onMouseDown={()=>flyToPlace(p)}>
                               <span style={{fontSize:"16px"}}>📍</span>
                               <div>
-                                <div style={{fontSize:"14px",color:"var(--text)"}}>{p.name||p.display_name.split(",")[0]}</div>
-                                <div style={{fontSize:"11px",color:"var(--text-light)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"240px"}}>{p.display_name}</div>
+                                <div style={{fontSize:"14px",color:"var(--text)"}}>{p.displayName?.text||"Place"}</div>
+                                <div style={{fontSize:"11px",color:"var(--text-light)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"240px"}}>{p.formattedAddress||""}</div>
                               </div>
                             </div>
                           ))}
@@ -837,13 +932,9 @@ export default function AdventureMap() {
               </button>
               {tripFilter.active && (
                 <>
-                  <select className="chip" value={tripFilter.startMonth} onChange={e=>setTripFilter(p=>({...p,startMonth:+e.target.value}))}>
-                    {MONTHS.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
-                  </select>
-                  <span style={{color:"var(--text-light)",fontSize:12}}>–</span>
-                  <select className="chip" value={tripFilter.endMonth} onChange={e=>setTripFilter(p=>({...p,endMonth:+e.target.value}))}>
-                    {MONTHS.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
-                  </select>
+                  <input type="date" className="trip-date" value={tripFilter.start} onChange={e=>setTripFilter(p=>({...p,start:e.target.value}))}/>
+                  <span style={{color:"var(--text-light)",fontSize:12}}>→</span>
+                  <input type="date" className="trip-date" value={tripFilter.end} onChange={e=>setTripFilter(p=>({...p,end:e.target.value}))}/>
                 </>
               )}
             </div>
@@ -857,10 +948,19 @@ export default function AdventureMap() {
               <GoogleMapView
                 spots={displaySpots}
                 pendingPlace={pendingPlace}
+                draftPoint={showAddForm && newSpot.lat && newSpot.lng ? { lat: parseFloat(newSpot.lat), lng: parseFloat(newSpot.lng) } : null}
                 onMapClick={handleMapClick}
                 onMarkerClick={openSpot}
                 getCat={getCat}
+                mode={mapMode}
               />
+
+              {/* Map mode toggle: overview (calm) vs full (search everything) */}
+              <button className="map-mode-toggle"
+                onClick={()=>setMapMode(m=>m==="overview"?"full":"overview")}
+                title="Switch map mode">
+                {mapMode==="overview" ? "🔍 Search mode" : "🗺 Overview"}
+              </button>
 
               {showAddForm && <div className="map-hint">👆 Click on the map to place your spot</div>}
 
@@ -954,6 +1054,7 @@ export default function AdventureMap() {
                         {selectedSpot.status==="visited"?"✅ Visited":"🌟 Want to go"}
                       </span>
                       {timingTag && <span className="tag timing">🗓 {timingTag}</span>}
+                      <a className="tag dir" href={`https://www.google.com/maps/dir/?api=1&destination=${selectedSpot.lat},${selectedSpot.lng}`} target="_blank" rel="noopener">🧭 Directions</a>
                       {selectedSpot.strollerFriendly&&<span className="tag plain">🍼</span>}
                       <div style={{marginLeft:"auto"}}><StarRating rating={selectedSpot.rating} onRate={r=>updateSpot(selectedSpot.id,"rating",r)} readonly={selectedSpot.status!=="visited"}/></div>
                     </div>
@@ -1081,6 +1182,7 @@ export default function AdventureMap() {
                       {spot.status==="visited"?"✅ Visited":"🌟 Want to go"}
                     </span>
                     {fullTimingTag && <span className="tag timing">🗓 {fullTimingTag}</span>}
+                    <a className="tag dir" href={`https://www.google.com/maps/dir/?api=1&destination=${spot.lat},${spot.lng}`} target="_blank" rel="noopener">🧭 Get directions</a>
                     {spot.strollerFriendly&&<span className="tag plain">🍼 Stroller friendly</span>}
                     <div style={{marginLeft:"auto"}}>
                       <StarRating rating={spot.rating} onRate={r=>updateSpot(spot.id,"rating",r)} readonly={spot.status!=="visited"}/>
