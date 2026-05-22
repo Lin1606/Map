@@ -35,21 +35,21 @@ const GOOGLE_MAPS_API_KEY = "AIzaSyChVCf5wrydzuAAuoFkUjOB8h9OaRA5Q5U";
 // labels and public-transport lines. Soft colours, and — like the normal map —
 // built-up/city areas look different from nature so you can tell them apart.
 const OVERVIEW_STYLE = [
-  { elementType: "geometry", stylers: [{ color: "#eceae3" }] },
+  { elementType: "geometry", stylers: [{ color: "#f0eee7" }] },
   { elementType: "labels.text.fill", stylers: [{ color: "#1a1a1a" }] },
   { elementType: "labels.text.stroke", stylers: [{ color: "#ffffff" }, { weight: 3 }] },
   { featureType: "poi.business", stylers: [{ visibility: "off" }] },
   { featureType: "poi", elementType: "labels.icon", stylers: [{ visibility: "off" }] },
   { featureType: "transit", stylers: [{ visibility: "off" }] },
   { featureType: "road", elementType: "labels.icon", stylers: [{ visibility: "off" }] },
-  { featureType: "road", elementType: "geometry", stylers: [{ color: "#ffffff" }] },
-  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#f3e9d2" }] },
-  // built-up / city areas — slightly warm grey so they read as "town"
-  { featureType: "landscape.man_made", elementType: "geometry", stylers: [{ color: "#e2ded3" }] },
-  // open nature — soft green
-  { featureType: "landscape.natural", elementType: "geometry", stylers: [{ color: "#dce8cf" }] },
-  // parks / forests — a touch stronger green
-  { featureType: "poi.park", elementType: "geometry", stylers: [{ color: "#c2dcae" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#d8d4ca" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#e6d9b8" }] },
+  // built-up / city areas — clear warm grey so they read as "town"
+  { featureType: "landscape.man_made", elementType: "geometry", stylers: [{ color: "#dcd8cc" }] },
+  // open nature — clearly green so it stands apart from the city
+  { featureType: "landscape.natural", elementType: "geometry", stylers: [{ color: "#cfe3bc" }] },
+  // parks / forests — stronger green
+  { featureType: "poi.park", elementType: "geometry", stylers: [{ color: "#bcd9a4" }] },
   { featureType: "water", elementType: "geometry", stylers: [{ color: "#a9cbdd" }] },
 ];
 
@@ -282,7 +282,7 @@ function QuillEditor({ content, onChange }) {
 // 🗺 GOOGLE MAP VIEW — replaces the old Leaflet map
 // Draws the map, the spot pins, and the blue "pending" marker.
 // ============================================================
-function GoogleMapView({ spots, pendingPlace, draftPoint, onMapClick, onMarkerClick, getCat, mode }) {
+function GoogleMapView({ spots, pendingPlace, draftPoint, onMapClick, onMarkerClick, onDraftMove, getCat, mode }) {
   const mapRef = useRef(null);        // the <div> the map draws into
   const mapObj = useRef(null);        // the google.maps.Map instance
   const markers = useRef([]);         // current spot pins
@@ -387,7 +387,8 @@ function GoogleMapView({ spots, pendingPlace, draftPoint, onMapClick, onMarkerCl
     }
   }, [pendingPlace, ready]);
 
-  // 4) the pin shown at the spot you're currently placing (click-to-add)
+  // 4) the pin shown at the spot you're currently placing — DRAGGABLE so you
+  //    can nudge it to sit exactly right.
   useEffect(() => {
     if (!ready) return;
     const g = window.google;
@@ -396,6 +397,8 @@ function GoogleMapView({ spots, pendingPlace, draftPoint, onMapClick, onMarkerCl
       draftMarker.current = new g.maps.Marker({
         position: { lat: draftPoint.lat, lng: draftPoint.lng },
         map: mapObj.current,
+        draggable: true,
+        cursor: "move",
         zIndex: 9999,
         icon: {
           path: g.maps.SymbolPath.CIRCLE,
@@ -405,6 +408,10 @@ function GoogleMapView({ spots, pendingPlace, draftPoint, onMapClick, onMarkerCl
           strokeWeight: 3,
           scale: 9,
         },
+      });
+      // when you finish dragging, report the new spot back up
+      draftMarker.current.addListener("dragend", (e) => {
+        onDraftMove && onDraftMove({ lat: e.latLng.lat(), lng: e.latLng.lng() });
       });
     }
   }, [draftPoint, ready]);
@@ -441,9 +448,12 @@ export default function AdventureMap() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchResults, setSearchResults] = useState([]);
   const [searchFocused, setSearchFocused] = useState(false);
-  const [nominatimResults, setNominatimResults] = useState([]);
   const [pendingPlace, setPendingPlace] = useState(null);
   const [mapMode, setMapMode] = useState("overview");
+  // The "search mode" button on the map turns into a search box for ADDING places.
+  const [addSearch, setAddSearch] = useState("");
+  const [addResults, setAddResults] = useState([]);
+  const addSearchTimeout = useRef(null);
   const [shareNotice, setShareNotice] = useState(false);
   const searchTimeout = useRef(null);
   const [newSpot, setNewSpot] = useState({
@@ -515,32 +525,33 @@ export default function AdventureMap() {
   const signIn = async () => { try { await signInWithPopup(auth, googleProvider); } catch (e) { console.error(e); } };
   const signOutUser = async () => { try { await signOut(auth); } catch (e) { console.error(e); } };
 
+  // TOP-RIGHT search = only YOUR existing spots. No Google, no cost.
   const handleSearch = (val) => {
     setSearch(val);
-    if (!val.trim()) { setSearchResults([]); setNominatimResults([]); return; }
+    if (!val.trim()) { setSearchResults([]); return; }
     const q = val.toLowerCase();
-    setSearchResults(spots.filter(s => `${s.name} ${s.city||""} ${s.country||""}`.toLowerCase().includes(q)).slice(0, 4));
-    clearTimeout(searchTimeout.current);
+    setSearchResults(spots.filter(s => `${s.name} ${s.city||""} ${s.country||""}`.toLowerCase().includes(q)).slice(0, 6));
+  };
+
+  // MAP "search mode" box = search Google to ADD a new place.
+  const handleAddSearch = (val) => {
+    setAddSearch(val);
+    if (!val.trim()) { setAddResults([]); return; }
+    clearTimeout(addSearchTimeout.current);
     // Wait until you've stopped typing for 500ms, then do ONE Google search.
-    // This keeps the number of paid calls tiny.
-    searchTimeout.current = setTimeout(async () => {
+    addSearchTimeout.current = setTimeout(async () => {
       try {
         const res = await fetch("https://places.googleapis.com/v1/places:searchText", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
-            // only ask for the fields we use → keeps it in the cheapest tier
             "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location",
           },
           body: JSON.stringify({ textQuery: val, maxResultCount: 5 }),
         });
         const data = await res.json();
-        const places = data.places || [];
-        setNominatimResults(places);
-        // As soon as we have real places to look at, switch the map to the
-        // detailed "search" look so you can recognise where things are.
-        if (places.length > 0) setMapMode("full");
+        setAddResults(data.places || []);
       } catch (e) { console.error(e); }
     }, 500);
   };
@@ -556,15 +567,13 @@ export default function AdventureMap() {
   };
 
   // Click a Google result → fill the Add form automatically (no guessing!)
-  // and drop you straight into adding it.
   const flyToPlace = (place) => {
     const p = parsePlace(place);
     setPendingPlace(p);                 // shows a pin + flies there
     setNewSpot(prev => ({ ...prev, ...p }));   // pre-fills the form
     setShowAddForm(true);
     setSelectedSpotId(null);
-    setSearch(""); setSearchResults([]); setNominatimResults([]);
-    setSearchOpen(false);
+    setAddSearch(""); setAddResults([]);
     setView("map");
     setMapMode("full");                 // keep details visible while placing
   };
@@ -653,6 +662,11 @@ export default function AdventureMap() {
     setNewSpot(p => ({ ...p, lat: latlng.lat.toFixed(5), lng: latlng.lng.toFixed(5) }));
     if (!showAddForm) { setShowAddForm(true); setSelectedSpotId(null); }
   }, [showAddForm]);
+
+  // when you drag the draft pin, save the new exact spot into the form
+  const handleDraftMove = useCallback((latlng) => {
+    setNewSpot(p => ({ ...p, lat: latlng.lat.toFixed(5), lng: latlng.lng.toFixed(5) }));
+  }, []);
 
   const spot = editing ? editDraft : selectedSpot;
 
@@ -826,6 +840,15 @@ export default function AdventureMap() {
 
     .map-mode-toggle{position:absolute;top:14px;left:14px;z-index:5;background:rgba(255,255,255,0.95);border:1px solid var(--border);border-radius:22px;padding:7px 14px;font-family:var(--fb);font-size:13px;color:var(--text);cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,0.1);backdrop-filter:blur(6px);transition:all .15s}
     .map-mode-toggle:hover{background:#fff;border-color:var(--text-mid)}
+    .map-search-box{position:absolute;top:14px;left:14px;z-index:6;width:320px;max-width:calc(100% - 28px);background:rgba(255,255,255,0.97);border:1px solid var(--border);border-radius:22px;box-shadow:0 2px 12px rgba(0,0,0,0.12);backdrop-filter:blur(6px);display:flex;align-items:center;padding:4px 6px 4px 4px}
+    .map-search-back{border:none;background:none;cursor:pointer;font-size:16px;width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s}
+    .map-search-back:hover{background:var(--bg-soft)}
+    .map-search-input{flex:1;border:none;background:none;outline:none;font-family:var(--fb);font-size:14px;color:var(--text);padding:6px 4px}
+    .map-search-clear{border:none;background:none;cursor:pointer;color:var(--text-light);font-size:14px;width:26px;height:26px;border-radius:50%;flex-shrink:0}
+    .map-search-clear:hover{background:var(--bg-soft);color:var(--text)}
+    .map-search-results{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.14);overflow:hidden;max-height:320px;overflow-y:auto}
+    .map-search-result{padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .12s}
+    .map-search-result:hover{background:var(--bg-soft)}
 
     .add-btn{position:absolute;bottom:22px;right:22px;width:44px;height:44px;border-radius:50%;background:var(--accent);color:white;border:none;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(0,0,0,.18);transition:transform .18s;z-index:999;font-family:var(--fb)}
     .add-btn:hover{transform:scale(1.08)}
@@ -893,43 +916,24 @@ export default function AdventureMap() {
               </button>
               {searchOpen && (
                 <div style={{position:"relative",flex:1}}>
-                  <input className="search-input" placeholder="Search spots or find a place…" value={search}
+                  <input className="search-input" placeholder="Search your spots…" value={search}
                     onChange={e=>handleSearch(e.target.value)}
                     onFocus={()=>setSearchFocused(true)}
                     onBlur={()=>setTimeout(()=>setSearchFocused(false),200)}
                     autoFocus/>
-                  {searchFocused && (searchResults.length > 0 || nominatimResults.length > 0) && (
+                  {searchFocused && searchResults.length > 0 && (
                     <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,right:0,background:"var(--bg)",border:"1px solid var(--border)",borderRadius:"10px",boxShadow:"0 4px 20px rgba(0,0,0,0.12)",zIndex:9999,overflow:"hidden",maxHeight:"320px",overflowY:"auto"}}>
-                      {searchResults.length > 0 && (
-                        <>
-                          <div style={{padding:"8px 14px 4px",fontSize:"10px",fontWeight:500,letterSpacing:".14em",textTransform:"uppercase",color:"var(--text-light)"}}>Your spots</div>
-                          {searchResults.map(s => (
-                            <div key={s.id} style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:10}}
-                              onMouseDown={()=>{openSpot(s.id);setSearchOpen(false);setSearch("");setSearchResults([]);setNominatimResults([]);setView("map");}}>
-                              <span style={{fontSize:"16px"}}>{getCat(s.category).emoji}</span>
-                              <div>
-                                <div style={{fontSize:"14px",color:"var(--text)"}}>{s.name}</div>
-                                <div style={{fontSize:"11px",color:"var(--text-light)"}}>{s.city}{s.city&&s.country?" · ":""}{s.country}</div>
-                              </div>
-                            </div>
-                          ))}
-                        </>
-                      )}
-                      {nominatimResults.length > 0 && (
-                        <>
-                          <div style={{padding:"8px 14px 4px",fontSize:"10px",fontWeight:500,letterSpacing:".14em",textTransform:"uppercase",color:"var(--text-light)",borderTop:searchResults.length>0?"1px solid var(--border-soft)":"none"}}>Places on the map</div>
-                          {nominatimResults.map((p,i) => (
-                            <div key={i} style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:10}}
-                              onMouseDown={()=>flyToPlace(p)}>
-                              <span style={{fontSize:"16px"}}>📍</span>
-                              <div>
-                                <div style={{fontSize:"14px",color:"var(--text)"}}>{p.displayName?.text||"Place"}</div>
-                                <div style={{fontSize:"11px",color:"var(--text-light)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"240px"}}>{p.formattedAddress||""}</div>
-                              </div>
-                            </div>
-                          ))}
-                        </>
-                      )}
+                      <div style={{padding:"8px 14px 4px",fontSize:"10px",fontWeight:500,letterSpacing:".14em",textTransform:"uppercase",color:"var(--text-light)"}}>Your spots</div>
+                      {searchResults.map(s => (
+                        <div key={s.id} style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:10}}
+                          onMouseDown={()=>{openSpot(s.id);setSearchOpen(false);setSearch("");setSearchResults([]);setView("map");}}>
+                          <span style={{fontSize:"16px"}}>{getCat(s.category).emoji}</span>
+                          <div>
+                            <div style={{fontSize:"14px",color:"var(--text)"}}>{s.name}</div>
+                            <div style={{fontSize:"11px",color:"var(--text-light)"}}>{s.city}{s.city&&s.country?" · ":""}{s.country}</div>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -997,18 +1001,53 @@ export default function AdventureMap() {
                 draftPoint={showAddForm && newSpot.lat && newSpot.lng ? { lat: parseFloat(newSpot.lat), lng: parseFloat(newSpot.lng) } : null}
                 onMapClick={handleMapClick}
                 onMarkerClick={openSpot}
+                onDraftMove={handleDraftMove}
                 getCat={getCat}
                 mode={mapMode}
               />
 
-              {/* Map mode toggle: overview (calm) vs full (search everything) */}
-              <button className="map-mode-toggle"
-                onClick={()=>setMapMode(m=>m==="overview"?"full":"overview")}
-                title="Switch map mode">
-                {mapMode==="overview" ? "🔍 Search mode" : "🗺 Overview"}
-              </button>
+              {/* Map mode toggle that becomes a SEARCH BOX for adding places.
+                  Overview → click → switches to detailed map AND opens a search
+                  field right here. Type → Google results → pick one → form fills. */}
+              {mapMode === "overview" ? (
+                <button className="map-mode-toggle"
+                  onClick={()=>setMapMode("full")}
+                  title="Switch to search mode to add a place">
+                  🔍 Search mode
+                </button>
+              ) : (
+                <div className="map-search-box">
+                  <button className="map-search-back" title="Back to overview"
+                    onClick={()=>{ setMapMode("overview"); setAddSearch(""); setAddResults([]); }}>
+                    🗺
+                  </button>
+                  <input
+                    className="map-search-input"
+                    placeholder="Search a place to add…"
+                    value={addSearch}
+                    onChange={e=>handleAddSearch(e.target.value)}
+                    autoFocus
+                  />
+                  {addSearch && (
+                    <button className="map-search-clear" onClick={()=>{ setAddSearch(""); setAddResults([]); }}>✕</button>
+                  )}
+                  {addResults.length > 0 && (
+                    <div className="map-search-results">
+                      {addResults.map((p,i)=>(
+                        <div key={i} className="map-search-result" onMouseDown={()=>flyToPlace(p)}>
+                          <span style={{fontSize:"16px"}}>📍</span>
+                          <div style={{minWidth:0}}>
+                            <div style={{fontSize:"14px",color:"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{p.displayName?.text||"Place"}</div>
+                            <div style={{fontSize:"11px",color:"var(--text-light)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{p.formattedAddress||""}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
-              {showAddForm && <div className="map-hint">👆 Click on the map to place your spot</div>}
+              {showAddForm && <div className="map-hint">👆 Click the map, or drag the pin to fine-tune</div>}
 
               {pendingPlace && !showAddForm && (
                 <div style={{position:"absolute",bottom:24,left:"50%",transform:"translateX(-50%)",zIndex:999,display:"flex",gap:8,alignItems:"center"}}>
